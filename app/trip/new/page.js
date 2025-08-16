@@ -1,5 +1,5 @@
 "use client";
-
+import { saveDraft, saveTrip, clearDraft } from "../../lib/storage";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import PromptCard from "../../components/PromptCard";
@@ -21,6 +21,18 @@ export default function NewTripWizard() {
     const prefill = search.get("destination");
     if (prefill) setState((s) => ({ ...s, destination: prefill }));
   }, [search]);
+  // Auto-save the wizard draft to localStorage whenever fields change
+  useEffect(() => {
+    const draftTrip = {
+      destination: state.destination,
+      partyType: state.partyType,
+      transport: state.transport,
+      budgetModel: state.budgetModel,
+      nights: Number(state.nights),
+      vibe: state.vibe,
+    };
+   saveDraft(draftTrip);
+}, [state.destination, state.partyType, state.transport, state.budgetModel, state.nights, state.vibe]);
 
   const canNext = useMemo(() => {
     switch (step) {
@@ -36,7 +48,21 @@ export default function NewTripWizard() {
   const finish = () => {
     // For MVP, just navigate to a draft URL. In Week 2 we’ll save to Firestore.
     const id = `draft-${Date.now()}`;
-    console.log("Wizard result:", state);
+    const trip = {
+    destination: state.destination,
+    partyType: state.partyType,
+    transport: state.transport,
+    budgetModel: state.budgetModel,
+    nights: Number(state.nights),
+    vibe: state.vibe,
+    origin: "Toronto",     // temporary placeholder
+    createdAt: Date.now(), // timestamp
+  };
+
+  saveTrip(id, trip);  // write final trip to localStorage
+  clearDraft();        // clear the in-progress draft
+
+    
     router.push(`/trip/${id}`);
   };
 
