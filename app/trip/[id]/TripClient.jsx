@@ -26,7 +26,7 @@ export default function TripClient({ id }) {
 
   useEffect(() => setMounted(true), []);
 
-  // Load data from localStorage after mount
+  // Load + normalize after mount
   useEffect(() => {
     if (!mounted) return;
     const byId = loadTrip(id);
@@ -36,21 +36,36 @@ export default function TripClient({ id }) {
       setTrip(null);
       return;
     }
+
     const nights = Number(initialRaw.nights ?? 4);
+
+    // activities
     const activities = Array.isArray(initialRaw.activities)
       ? initialRaw.activities
       : seedActivities(nights);
-
-    // Ensure activities length matches nights+1 (expand/trim if nights changed)
     const days = Math.max(1, nights + 1);
-    let normalized = activities.slice(0, days);
-    while (normalized.length < days)
-      normalized.push(["Morning activity", "Explore", "Group dinner"]);
+    let normalizedActs = activities.slice(0, days);
+    while (normalizedActs.length < days)
+      normalizedActs.push(["Morning activity", "Explore", "Group dinner"]);
 
-    const initial = { id, ...initialRaw, nights, activities: normalized };
+    // participants
+    const participants = Array.isArray(initialRaw.participants)
+      ? initialRaw.participants
+      : [];
+
+    // chat messages
+    const chat = Array.isArray(initialRaw.chat) ? initialRaw.chat : [];
+
+    const initial = {
+      id,
+      ...initialRaw,
+      nights,
+      activities: normalizedActs,
+      participants,
+      chat,
+    };
     setTrip(initial);
-    // Persist a normalized copy so we’re consistent on refresh
-    saveTrip(id, initial);
+    saveTrip(id, initial); // persist normalized shape
   }, [id, mounted]);
 
   if (!mounted) return <div className="text-sm text-gray-500">Loading trip…</div>;
@@ -62,21 +77,21 @@ export default function TripClient({ id }) {
     );
   }
 
-  // Derive view fields from current trip state
+  // Derived fields
   const origin = trip.origin || "Toronto";
   const destination = trip.destination || "Banff";
   const nights = Number(trip.nights ?? 4);
-  const days = Math.max(1, nights + 1); // include departure day
+  const days = Math.max(1, nights + 1);
   const mode = trip.transport || "flights";
   const vibe = trip.vibe || "adventure";
 
-  // ---------- Persistence helper ----------
+  // Persistence helper
   function persist(next) {
     saveTrip(trip.id, next);
     setTrip(next);
   }
 
-  // ---------- Activity CRUD ----------
+  // Activities: CRUD + reorder
   function addActivity(dayIndex, text) {
     if (!text?.trim()) return;
     const next = structuredClone(trip);
@@ -96,15 +111,42 @@ export default function TripClient({ id }) {
     persist(next);
   }
 
-  // ---------- NEW: Reorder within a day ----------
   function moveActivity(dayIndex, fromIndex, toIndex) {
     const items = trip.activities[dayIndex];
     if (!items) return;
-    if (toIndex < 0 || toIndex >= items.length) return; // out of bounds → ignore
-
+    if (toIndex < 0 || toIndex >= items.length) return;
     const next = structuredClone(trip);
     const [moved] = next.activities[dayIndex].splice(fromIndex, 1);
     next.activities[dayIndex].splice(toIndex, 0, moved);
+    persist(next);
+  }
+
+  // Participants: add/remove
+  function addParticipant(email) {
+    const t = (email || "").trim();
+    if (!/.+@.+\..+/.test(t)) return; // UI uses stricter validator; this is a guard
+    const next = structuredClone(trip);
+    next.participants = Array.from(new Set([...(next.participants || []), t]));
+    persist(next);
+  }
+
+  function removeParticipant(index) {
+    const next = structuredClone(trip);
+    (next.participants ||= []).splice(index, 1);
+    persist(next);
+  }
+
+  // Chat: send message (persist)
+  function sendChat(text, from = "you@example.com") {
+    const t = (text || "").trim();
+    if (!t) return;
+    const next = structuredClone(trip);
+    (next.chat ||= []).push({
+      id: (crypto?.randomUUID && crypto.randomUUID()) || String(Date.now()),
+      from,
+      text: t,
+      at: Date.now(),
+    });
     persist(next);
   }
 
@@ -115,7 +157,6 @@ export default function TripClient({ id }) {
     const newDays = Math.max(1, newNights + 1);
     let acts = Array.isArray(updated.activities) ? updated.activities : trip.activities;
 
-    // Expand/trim to match new day count
     let normalized = acts.slice(0, newDays);
     while (normalized.length < newDays)
       normalized.push(["Morning activity", "Explore", "Group dinner"]);
@@ -128,20 +169,26 @@ export default function TripClient({ id }) {
     <div className="mx-auto max-w-5xl space-y-6 p-4">
       <TripMetaEditor trip={trip} onChange={handleTripMetaChange} />
 
-      <section className="rounded-2xl border border-gray-100 bg-white p-5 shadow-md">
-        <h2 className="text-xl font-bold">
+      <section className="card-lg">
+        <h2 className="heading">
           {destination} — {days} day{days > 1 ? "s" : ""} / {nights} night
           {nights > 1 ? "s" : ""}
         </h2>
-        <p className="text-sm text-gray-600">
+        <p className="subtle">
           Party: {trip?.partyType || "solo"} · Budget: {trip?.budgetModel || "individual"} ·
           Mode: {mode} · Vibe: {vibe}
         </p>
       </section>
 
       <section className="grid gap-6 md:grid-cols-2">
-        <TransportLinks mode={mode} origin={origin} destination={destination} />
-        <ParticipantsPanel />
+        <div className="card">
+          <TransportLinks mode={mode} origin={origin} destination={destination} />
+        </div>
+        <ParticipantsPanel
+          participants={trip.participants || []}
+          onAdd={addParticipant}
+          onRemove={removeParticipant}
+        />
       </section>
 
       <section className="grid gap-6 md:grid-cols-2">
@@ -154,11 +201,15 @@ export default function TripClient({ id }) {
               onAdd={(text) => addActivity(i, text)}
               onEdit={(idx, text) => editActivity(i, idx, text)}
               onRemove={(idx) => removeActivity(i, idx)}
-              onMove={(fromIdx, toIdx) => moveActivity(i, fromIdx, toIdx)} // NEW
+              onMove={(fromIdx, toIdx) => moveActivity(i, fromIdx, toIdx)}
             />
           ))}
         </div>
-        <ChatBox me="you@example.com" />
+        <ChatBox
+          me="you@example.com"
+          messages={trip.chat || []}
+          onSend={sendChat}
+        />
       </section>
     </div>
   );

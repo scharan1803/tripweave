@@ -9,7 +9,7 @@ import { useState } from 'react';
  * - onAdd(text: string)
  * - onEdit(index: number, text: string)
  * - onRemove(index: number)
- * - onMove(fromIndex: number, toIndex: number)   // NEW
+ * - onMove(fromIndex: number, toIndex: number)
  */
 export default function ItineraryDay({
   dayNumber,
@@ -37,7 +37,6 @@ export default function ItineraryDay({
     if (editing.index < 0) return;
     const text = editing.value.trim();
     if (text.length === 0) {
-      // empty => treat as remove?
       setEditing({ index: -1, value: '' });
       return;
     }
@@ -49,8 +48,7 @@ export default function ItineraryDay({
     setEditing({ index: -1, value: '' });
   }
 
-  // Keyboard shortcuts for reordering while focused on an item input:
-  // Alt+ArrowUp / Alt+ArrowDown
+  // Alt+ArrowUp / Alt+ArrowDown reorders the selected item
   function handleReorderKey(e, idx) {
     if (!onMove) return;
     const up = e.altKey && e.key === 'ArrowUp';
@@ -62,29 +60,25 @@ export default function ItineraryDay({
   }
 
   return (
-    <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+    <div className="card">
       <div className="mb-3 flex items-center justify-between">
         <h3 className="text-lg font-semibold">Day {dayNumber}</h3>
         <div className="text-xs text-gray-400 hidden md:block">
-          Tip: Use <kbd className="rounded border px-1">Alt</kbd> + <kbd className="rounded border px-1">↑/↓</kbd> to reorder
+          Tip: <kbd className="rounded border px-1">Alt</kbd> + <kbd className="rounded border px-1">↑/↓</kbd> to reorder
         </div>
       </div>
 
       <ul className="space-y-2">
         {activities.map((a, idx) => (
           <li key={idx} className="flex items-center gap-2">
-            <span className="select-none rounded border px-2 py-1 text-xs text-gray-500">
-              {idx + 1}
-            </span>
+            <span className="knum">{idx + 1}</span>
 
             {editing.index === idx ? (
               <>
                 <input
-                  className="flex-1 rounded-lg border border-gray-300 px-2 py-1 outline-none focus:ring-2 focus:ring-slate-300"
+                  className="input flex-1"
                   value={editing.value}
-                  onChange={(e) =>
-                    setEditing((s) => ({ ...s, value: e.target.value }))
-                  }
+                  onChange={(e) => setEditing((s) => ({ ...s, value: e.target.value }))}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') commitEdit();
                     if (e.key === 'Escape') cancelEdit();
@@ -92,18 +86,8 @@ export default function ItineraryDay({
                   }}
                   autoFocus
                 />
-                <button
-                  className="rounded-lg bg-black px-3 py-1 text-sm text-white hover:opacity-90"
-                  onClick={commitEdit}
-                >
-                  Save
-                </button>
-                <button
-                  className="rounded-lg border border-gray-300 px-3 py-1 text-sm hover:bg-gray-50"
-                  onClick={cancelEdit}
-                >
-                  Cancel
-                </button>
+                <button className="btn btn-primary" onClick={commitEdit}>Save</button>
+                <button className="btn btn-outline" onClick={cancelEdit}>Cancel</button>
               </>
             ) : (
               <>
@@ -115,10 +99,9 @@ export default function ItineraryDay({
                   {a}
                 </span>
 
-                {/* Reorder buttons */}
                 <div className="flex items-center gap-1">
                   <button
-                    className="rounded-lg border border-gray-300 px-2 py-1 text-xs hover:bg-gray-50"
+                    className="btn btn-outline px-2 py-1 text-xs"
                     onClick={() => onMove?.(idx, idx - 1)}
                     disabled={idx === 0}
                     title="Move up (Alt+↑)"
@@ -126,7 +109,7 @@ export default function ItineraryDay({
                     ↑
                   </button>
                   <button
-                    className="rounded-lg border border-gray-300 px-2 py-1 text-xs hover:bg-gray-50"
+                    className="btn btn-outline px-2 py-1 text-xs"
                     onClick={() => onMove?.(idx, idx + 1)}
                     disabled={idx === activities.length - 1}
                     title="Move down (Alt+↓)"
@@ -135,18 +118,8 @@ export default function ItineraryDay({
                   </button>
                 </div>
 
-                <button
-                  className="rounded-lg border border-gray-300 px-3 py-1 text-sm hover:bg-gray-50"
-                  onClick={() => startEdit(idx)}
-                >
-                  Edit
-                </button>
-                <button
-                  className="rounded-lg border border-gray-300 px-3 py-1 text-sm hover:bg-gray-50"
-                  onClick={() => onRemove?.(idx)}
-                >
-                  Remove
-                </button>
+                <button className="btn btn-outline" onClick={() => startEdit(idx)}>Edit</button>
+                <button className="btn btn-outline" onClick={() => onRemove?.(idx)}>Remove</button>
               </>
             )}
           </li>
@@ -155,18 +128,13 @@ export default function ItineraryDay({
 
       <div className="mt-3 flex items-center gap-2">
         <input
-          className="flex-1 rounded-lg border border-gray-300 px-3 py-2 outline-none focus:ring-2 focus:ring-slate-300"
+          className="input flex-1"
           placeholder="Add activity (e.g., Lake Louise morning hike)"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
         />
-        <button
-          className="rounded-lg bg-black px-3 py-2 text-sm text-white hover:opacity-90"
-          onClick={handleAdd}
-        >
-          Add
-        </button>
+        <button className="btn btn-primary" onClick={handleAdd}>Add</button>
       </div>
     </div>
   );
