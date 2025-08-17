@@ -8,6 +8,7 @@ import ParticipantsPanel from "../../components/ParticipantsPanel";
 import ItineraryDay from "../../components/ItineraryDay";
 import ChatBox from "../../components/ChatBox";
 import TripMetaEditor from "../../components/TripMetaEditor";
+import BudgetPanel from "../../components/BudgetPanel";
 
 // Create default activities if none exist yet
 function seedActivities(nights) {
@@ -19,10 +20,21 @@ function seedActivities(nights) {
   });
   return arr;
 }
+function fmtRange(startISO, endISO) {
+  if (!startISO || !endISO) return "";
+  const s = new Date(startISO);
+  const e = new Date(endISO);
+  if (isNaN(s.getTime()) || isNaN(e.getTime())) return "";
+  const opts = { year: "numeric", month: "short", day: "numeric" };
+  return `${s.toLocaleDateString(undefined, opts)} → ${e.toLocaleDateString(undefined, opts)}`;
+}
 
 export default function TripClient({ id }) {
   const [mounted, setMounted] = useState(false);
   const [trip, setTrip] = useState(null);
+
+  // Pretend-auth: use your email/handle here. (Swap to real auth later.)
+  const currentUserId = "you@example.com";
 
   useEffect(() => setMounted(true), []);
 
@@ -49,12 +61,27 @@ export default function TripClient({ id }) {
       normalizedActs.push(["Morning activity", "Explore", "Group dinner"]);
 
     // participants
-    const participants = Array.isArray(initialRaw.participants)
-      ? initialRaw.participants
-      : [];
+    const participants = Array.isArray(initialRaw.participants) ? initialRaw.participants : [];
 
     // chat messages
     const chat = Array.isArray(initialRaw.chat) ? initialRaw.chat : [];
+
+    // budget (solo/group)
+    const budget =
+      initialRaw.budget && typeof initialRaw.budget === "object"
+        ? initialRaw.budget
+        : { currency: "USD", daily: undefined };
+    const participantBudgets =
+      initialRaw.participantBudgets && typeof initialRaw.participantBudgets === "object"
+        ? initialRaw.participantBudgets
+        : {};
+
+    // party/budget model
+    const partyType = initialRaw.partyType || "solo";
+    const budgetModel = initialRaw.budgetModel || "individual";
+
+    // owner (lock global budget to owner)
+    const ownerId = initialRaw.ownerId || currentUserId;
 
     const initial = {
       id,
@@ -63,6 +90,11 @@ export default function TripClient({ id }) {
       activities: normalizedActs,
       participants,
       chat,
+      budget,
+      participantBudgets,
+      partyType,
+      budgetModel,
+      ownerId,
     };
     setTrip(initial);
     saveTrip(id, initial); // persist normalized shape
@@ -84,6 +116,7 @@ export default function TripClient({ id }) {
   const days = Math.max(1, nights + 1);
   const mode = trip.transport || "flights";
   const vibe = trip.vibe || "adventure";
+  const dateRange = fmtRange(trip.startDate, trip.endDate);
 
   // Persistence helper
   function persist(next) {
@@ -98,19 +131,16 @@ export default function TripClient({ id }) {
     next.activities[dayIndex].push(text.trim());
     persist(next);
   }
-
   function editActivity(dayIndex, itemIndex, text) {
     const next = structuredClone(trip);
     next.activities[dayIndex][itemIndex] = text;
     persist(next);
   }
-
   function removeActivity(dayIndex, itemIndex) {
     const next = structuredClone(trip);
     next.activities[dayIndex].splice(itemIndex, 1);
     persist(next);
   }
-
   function moveActivity(dayIndex, fromIndex, toIndex) {
     const items = trip.activities[dayIndex];
     if (!items) return;
@@ -124,20 +154,25 @@ export default function TripClient({ id }) {
   // Participants: add/remove
   function addParticipant(email) {
     const t = (email || "").trim();
-    if (!/.+@.+\..+/.test(t)) return; // UI uses stricter validator; this is a guard
+    if (!/.+@.+\..+/.test(t)) return;
     const next = structuredClone(trip);
     next.participants = Array.from(new Set([...(next.participants || []), t]));
+    // initialize participant budget if a group baseline exists
+    next.participantBudgets = next.participantBudgets || {};
+    if (next.budget?.daily != null && next.participantBudgets[t] == null) {
+      next.participantBudgets[t] = Number(next.budget.daily) || 0;
+    }
     persist(next);
   }
-
   function removeParticipant(index) {
     const next = structuredClone(trip);
-    (next.participants ||= []).splice(index, 1);
+    const [removed] = (next.participants ||= []).splice(index, 1);
+    if (removed && next.participantBudgets) delete next.participantBudgets[removed];
     persist(next);
   }
 
   // Chat: send message (persist)
-  function sendChat(text, from = "you@example.com") {
+  function sendChat(text, from = currentUserId) {
     const t = (text || "").trim();
     if (!t) return;
     const next = structuredClone(trip);
@@ -150,9 +185,32 @@ export default function TripClient({ id }) {
     persist(next);
   }
 
-  // Keep activities in sync when nights change via meta editor
+  // Budget handlers
+  function updateBudget(payload) {
+    const next = structuredClone(trip);
+    next.budget = { ...(next.budget || {}), ...payload };
+    persist(next);
+  }
+  function setParticipantBudget(email, value) {
+    const next = structuredClone(trip);
+    next.participantBudgets = next.participantBudgets || {};
+    if (value === "" || value == null || Number.isNaN(Number(value))) {
+      delete next.participantBudgets[email];
+    } else {
+      next.participantBudgets[email] = Math.max(0, Number(value));
+    }
+    persist(next);
+  }
+
+  // Apply TripMetaEditor changes (keeps activities synced to nights)
   function handleTripMetaChange(updated) {
     if (!updated) return;
+
+    // If partyType is solo, force budgetModel to 'individual'
+    const partyType = updated.partyType || trip.partyType || "solo";
+    const budgetModel =
+      partyType === "solo" ? "individual" : updated.budgetModel || trip.budgetModel || "individual";
+
     const newNights = Number(updated.nights ?? nights);
     const newDays = Math.max(1, newNights + 1);
     let acts = Array.isArray(updated.activities) ? updated.activities : trip.activities;
@@ -161,7 +219,14 @@ export default function TripClient({ id }) {
     while (normalized.length < newDays)
       normalized.push(["Morning activity", "Explore", "Group dinner"]);
 
-    const next = { ...trip, ...updated, nights: newNights, activities: normalized };
+    const next = {
+      ...trip,
+      ...updated,
+      partyType,
+      budgetModel,
+      nights: newNights,
+      activities: normalized,
+    };
     persist(next);
   }
 
@@ -175,8 +240,9 @@ export default function TripClient({ id }) {
           {nights > 1 ? "s" : ""}
         </h2>
         <p className="subtle">
-          Party: {trip?.partyType || "solo"} · Budget: {trip?.budgetModel || "individual"} ·
-          Mode: {mode} · Vibe: {vibe}
+          {dateRange ? `${dateRange} · ` : ""}
+          Party: {trip?.partyType || "solo"} · Budget: {trip?.budgetModel || "individual"} · Mode:{" "}
+          {mode} · Vibe: {vibe}
         </p>
       </section>
 
@@ -184,15 +250,32 @@ export default function TripClient({ id }) {
         <div className="card">
           <TransportLinks mode={mode} origin={origin} destination={destination} />
         </div>
+
+        {/* Budget panel with permissions */}
+        <BudgetPanel
+          partyType={trip.partyType || "solo"}
+          participants={trip.participants || []}
+          budget={trip.budget}
+          participantBudgets={trip.participantBudgets || {}}
+          onUpdateBudget={updateBudget}
+          onSetParticipantBudget={setParticipantBudget}
+          ownerId={trip.ownerId}
+          currentUserId={currentUserId}
+        />
+      </section>
+
+      <section className="grid gap-6 md:grid-cols-2">
         <ParticipantsPanel
           participants={trip.participants || []}
           onAdd={addParticipant}
           onRemove={removeParticipant}
         />
+        <div className="hidden md:block" />
       </section>
 
-      <section className="grid gap-6 md:grid-cols-2">
-        <div className="space-y-4">
+      {/* Day tiles grid */}
+      <section>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
           {Array.from({ length: days }).map((_, i) => (
             <ItineraryDay
               key={i}
@@ -200,17 +283,17 @@ export default function TripClient({ id }) {
               activities={trip.activities[i]}
               onAdd={(text) => addActivity(i, text)}
               onEdit={(idx, text) => editActivity(i, idx, text)}
-              onRemove={(idx) => removeActivity(i, idx)}
+              onRemove={(idx) => removeActivity(i, idx, text)}
               onMove={(fromIdx, toIdx) => moveActivity(i, fromIdx, toIdx)}
             />
           ))}
         </div>
-        <ChatBox
-          me="you@example.com"
-          messages={trip.chat || []}
-          onSend={sendChat}
-        />
       </section>
+
+      {/* Chat shows only for group trips and floats bottom-right */}
+      {trip?.partyType !== "solo" && (
+        <ChatBox me={currentUserId} messages={trip.chat || []} onSend={sendChat} docked startOpen />
+      )}
     </div>
   );
 }

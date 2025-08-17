@@ -95,7 +95,7 @@ export default function ParticipantsPanel({ participants = [], onAdd, onRemove }
         <ul className="space-y-2">
           {participants.map((p, idx) => (
             <li
-              key={idx}
+              key={p}
               className="flex items-center justify-between rounded-lg border border-gray-200 px-3 py-2"
             >
               <span className="truncate">{p}</span>
