@@ -1,8 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { loadTrip, loadDraft } from "../../lib/storage";
-import { saveTrip } from "../../lib/db";
+import { loadTrip, loadDraft, saveTrip } from "../../lib/storage";
 import TransportLinks from "../../components/TransportLinks";
 import ParticipantsPanel from "../../components/ParticipantsPanel";
 import ItineraryDay from "../../components/ItineraryDay";
@@ -10,16 +9,21 @@ import ChatBox from "../../components/ChatBox";
 import TripMetaEditor from "../../components/TripMetaEditor";
 import BudgetPanel from "../../components/BudgetPanel";
 import ExportPDFButton from "../../components/ExportPDFButton";
+import TripMediaGallery from "../../components/TripMediaGallery";
+import { putMediaBlob } from "../../lib/mediaStore";
 
-// Create default activities if none exist yet
+// ==== CONFIG ====
+const MAX_MEDIA_BYTES = 250 * 1024 * 1024; // 250 MB cumulative per trip
+// ===============
+
+// Helpers
 function seedActivities(nights) {
-  const days = Math.max(1, Number(nights ?? 1) + 1); // include departure day
-  const arr = Array.from({ length: days }, (_, i) => {
+  const days = Math.max(1, Number(nights ?? 1) + 1);
+  return Array.from({ length: days }, (_, i) => {
     if (i === 0) return ["Arrive", "Check-in", "Dinner in town"];
     if (i === days - 1) return ["Pack up", "Leisurely brunch", "Depart"];
     return ["Morning activity", "Explore", "Group dinner"];
   });
-  return arr;
 }
 function fmtRange(startISO, endISO) {
   if (!startISO || !endISO) return "";
@@ -34,12 +38,11 @@ export default function TripClient({ id }) {
   const [mounted, setMounted] = useState(false);
   const [trip, setTrip] = useState(null);
 
-  // Pretend-auth for MVP
   const currentUserId = "you@example.com";
 
   useEffect(() => setMounted(true), []);
 
-  // Load + normalize after mount
+  // Load + normalize
   useEffect(() => {
     if (!mounted) return;
     const byId = loadTrip(id);
@@ -51,21 +54,18 @@ export default function TripClient({ id }) {
     }
 
     const nights = Number(initialRaw.nights ?? 4);
-
-    // activities
     const activities = Array.isArray(initialRaw.activities)
       ? initialRaw.activities
       : seedActivities(nights);
+
     const days = Math.max(1, nights + 1);
     let normalizedActs = activities.slice(0, days);
-    while (normalizedActs.length < days)
-      normalizedActs.push(["Morning activity", "Explore", "Group dinner"]);
+    while (normalizedActs.length < days) normalizedActs.push(["Morning activity", "Explore", "Group dinner"]);
 
-    // participants/chat
     const participants = Array.isArray(initialRaw.participants) ? initialRaw.participants : [];
     const chat = Array.isArray(initialRaw.chat) ? initialRaw.chat : [];
+    const media = Array.isArray(initialRaw.media) ? initialRaw.media : []; // [{id,name,type,size,createdAt}]
 
-    // budget
     const budget =
       initialRaw.budget && typeof initialRaw.budget === "object"
         ? initialRaw.budget
@@ -87,6 +87,7 @@ export default function TripClient({ id }) {
       activities: normalizedActs,
       participants,
       chat,
+      media,
       budget,
       participantBudgets,
       partyType,
@@ -94,8 +95,9 @@ export default function TripClient({ id }) {
       ownerId,
       submitted,
     };
+
     setTrip(initial);
-    saveTrip(id, initial); // persist normalized shape
+    saveTrip(id, initial);
   }, [id, mounted]);
 
   if (!mounted) return <div className="text-sm text-gray-500">Loading trip…</div>;
@@ -107,7 +109,7 @@ export default function TripClient({ id }) {
     );
   }
 
-  // Derived fields (no hardcoded fallbacks)
+  // Derived
   const origin = trip.origin || "";
   const destination = trip.destination || "";
   const nights = Number(trip.nights ?? 4);
@@ -116,13 +118,13 @@ export default function TripClient({ id }) {
   const vibe = trip.vibe || "adventure";
   const dateRange = fmtRange(trip.startDate, trip.endDate);
 
-  // Persistence helper
+  // Persist helper
   function persist(next) {
     saveTrip(trip.id, next);
     setTrip(next);
   }
 
-  // Activities: CRUD + reorder
+  // ---- Activities ----
   function addActivity(dayIndex, text) {
     if (!text?.trim()) return;
     const next = structuredClone(trip);
@@ -153,7 +155,7 @@ export default function TripClient({ id }) {
     persist(next);
   }
 
-  // Participants: add/remove
+  // ---- Participants ----
   function addParticipant(email) {
     const t = (email || "").trim();
     if (!/.+@.+\..+/.test(t)) return;
@@ -174,41 +176,80 @@ export default function TripClient({ id }) {
     persist(next);
   }
 
-  // Chat
-  function sendChat(text, from = currentUserId) {
-    const t = (text || "").trim();
-    if (!t) return;
+  // ---- Media helpers ----
+  function currentMediaBytes() {
+    return (trip.media || []).reduce((sum, m) => sum + (m.size || 0), 0);
+  }
+
+  async function addTripMedia(files) {
+    const list = Array.from(files || []);
+    if (list.length === 0) return [];
+
+    const already = currentMediaBytes();
+    const incoming = list.reduce((sum, f) => sum + (f.size || 0), 0);
+
+    if (already + incoming > MAX_MEDIA_BYTES) {
+      const remaining = Math.max(0, MAX_MEDIA_BYTES - already);
+      alert(
+        `Upload blocked: Trip media limit is 250 MB total.\n` +
+        `Current: ${(already / (1024 * 1024)).toFixed(1)} MB\n` +
+        `Incoming: ${(incoming / (1024 * 1024)).toFixed(1)} MB\n` +
+        `Remaining: ${(remaining / (1024 * 1024)).toFixed(1)} MB`
+      );
+      return [];
+    }
+
+    const metas = [];
+    for (const f of list) {
+      const mediaId = (crypto?.randomUUID && crypto.randomUUID()) || `${Date.now()}-${Math.random()}`;
+      await putMediaBlob(mediaId, f);
+      metas.push({
+        id: mediaId,
+        name: f.name,
+        type: f.type,
+        size: f.size,
+        createdAt: Date.now(),
+      });
+    }
+
+    const next = structuredClone(trip);
+    next.media = [...(next.media || []), ...metas];
+    next.updatedAt = Date.now();
+    persist(next);
+
+    return metas.map((m) => m.id);
+  }
+
+  // ---- Chat ----
+  function appendChat(text, mediaIds = [], from = currentUserId) {
     const next = structuredClone(trip);
     (next.chat ||= []).push({
       id: (crypto?.randomUUID && crypto.randomUUID()) || String(Date.now()),
       from,
-      text: t,
+      text: text || "",
+      mediaIds,
       at: Date.now(),
     });
     next.updatedAt = Date.now();
     persist(next);
   }
 
-  // Budget
-  function updateBudget(payload) {
-    const next = structuredClone(trip);
-    next.budget = { ...(next.budget || {}), ...payload };
-    next.updatedAt = Date.now();
-    persist(next);
-  }
-  function setParticipantBudget(email, value) {
-    const next = structuredClone(trip);
-    next.participantBudgets = next.participantBudgets || {};
-    if (value === "" || value == null || Number.isNaN(Number(value))) {
-      delete next.participantBudgets[email];
-    } else {
-      next.participantBudgets[email] = Math.max(0, Number(value));
+  // Called by ChatBox when user sends
+  async function handleChatSend(text, files) {
+    let mediaIds = [];
+    if (files && files.length > 0) {
+      mediaIds = await addTripMedia(files); // enforces 250MB cap
     }
-    next.updatedAt = Date.now();
-    persist(next);
+    // Even if media rejected due to cap, still send text (if provided)
+    if ((text && text.trim()) || (mediaIds && mediaIds.length > 0)) {
+      appendChat(text.trim(), mediaIds);
+    } else if (files?.length) {
+      // purely media and all rejected -> let user know
+      throw new Error("Media not sent — trip has reached the 250 MB limit.");
+    }
   }
 
-  // 🔑 Atomic submit/update from meta tile (includes first submit)
+  // ---- Meta submit (atomic) ----
   function handleSubmit(updates) {
     const base = { ...trip, ...(updates || {}) };
 
@@ -218,7 +259,6 @@ export default function TripClient({ id }) {
     const newNights = Number(base.nights ?? 4);
     const newDays = Math.max(1, newNights + 1);
 
-    // normalize activities length to nights+1
     let acts = Array.isArray(base.activities) ? base.activities : trip.activities || [];
     acts = acts.slice(0, newDays);
     while (acts.length < newDays) acts.push(["Morning activity", "Explore", "Group dinner"]);
@@ -229,10 +269,9 @@ export default function TripClient({ id }) {
       budgetModel,
       nights: newNights,
       activities: acts,
-      submitted: true,          // first time sets true; subsequent updates keep it true
+      submitted: true,
       updatedAt: Date.now(),
     };
-
     persist(next);
   }
 
@@ -244,7 +283,7 @@ export default function TripClient({ id }) {
         <>
           <section className="bg-white rounded-2xl shadow-md border border-gray-100 p-5">
             <h2 className="text-xl font-bold">
-              {destination || "Destination"} — {days} day{days > 1 ? "s" : ""} / {nights} night{nights > 1 ? "s" : ""}
+              {(destination || "Destination")} — {days} day{days > 1 ? "s" : ""} / {nights} night{nights > 1 ? "s" : ""}
             </h2>
             <p className="text-gray-600 text-sm">
               {dateRange ? `${dateRange} · ` : ""}
@@ -252,32 +291,55 @@ export default function TripClient({ id }) {
             </p>
           </section>
 
+          {/* Media + Transport */}
           <section className="grid gap-6 md:grid-cols-2">
+            <TripMediaGallery
+              tripId={trip.id}
+              media={trip.media || []}
+              partyType={trip.partyType || "solo"}
+              onAddMedia={addTripMedia}
+            />
             <div className="bg-white rounded-2xl shadow-md border border-gray-100 p-5">
               <TransportLinks mode={mode} origin={origin || "Origin"} destination={destination || "Destination"} />
             </div>
+          </section>
 
+          {/* Budget + Participants */}
+          <section className="grid gap-6 md:grid-cols-2">
             <BudgetPanel
               partyType={trip.partyType || "solo"}
               participants={trip.participants || []}
               budget={trip.budget}
               participantBudgets={trip.participantBudgets || {}}
-              onUpdateBudget={updateBudget}
-              onSetParticipantBudget={setParticipantBudget}
+              onUpdateBudget={(payload) => {
+                const next = structuredClone(trip);
+                next.budget = { ...(next.budget || {}), ...payload };
+                next.updatedAt = Date.now();
+                persist(next);
+              }}
+              onSetParticipantBudget={(email, value) => {
+                const next = structuredClone(trip);
+                next.participantBudgets = next.participantBudgets || {};
+                if (value === "" || value == null || Number.isNaN(Number(value))) {
+                  delete next.participantBudgets[email];
+                } else {
+                  next.participantBudgets[email] = Math.max(0, Number(value));
+                }
+                next.updatedAt = Date.now();
+                persist(next);
+              }}
               ownerId={trip.ownerId}
               currentUserId={currentUserId}
             />
-          </section>
 
-          <section className="grid gap-6 md:grid-cols-2">
             <ParticipantsPanel
               participants={trip.participants || []}
               onAdd={addParticipant}
               onRemove={removeParticipant}
             />
-            <div className="hidden md:block" />
           </section>
 
+          {/* Day tiles */}
           <section>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
               {Array.from({ length: days }).map((_, i) => (
@@ -298,13 +360,22 @@ export default function TripClient({ id }) {
             <ExportPDFButton trip={trip} />
           </div>
 
+          {/* Chat (group only) */}
           {trip?.partyType !== "solo" && (
-            <ChatBox me={currentUserId} messages={trip.chat || []} onSend={sendChat} docked startOpen />
+            <ChatBox
+              me={currentUserId}
+              tripId={trip.id}
+              messages={trip.chat || []}
+              mediaIndex={trip.media || []}
+              onSend={handleChatSend}
+              docked
+              startOpen
+            />
           )}
         </>
       ) : (
         <section className="rounded-2xl border border-dashed border-gray-200 bg-white p-6 text-sm text-gray-600">
-          Fill the trip details above and click <strong>Submit</strong> to expand the itinerary, budget,
+          Fill the trip details above and click <strong>Submit</strong> to expand the itinerary, media, budget,
           participants and chat sections.
         </section>
       )}
