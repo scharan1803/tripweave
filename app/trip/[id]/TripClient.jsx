@@ -9,6 +9,7 @@ import ItineraryDay from "../../components/ItineraryDay";
 import ChatBox from "../../components/ChatBox";
 import TripMetaEditor from "../../components/TripMetaEditor";
 import BudgetPanel from "../../components/BudgetPanel";
+import ExportPDFButton from "../../components/ExportPDFButton"; // 👈 added
 
 // Create default activities if none exist yet
 function seedActivities(nights) {
@@ -289,6 +290,11 @@ export default function TripClient({ id }) {
           ))}
         </div>
       </section>
+
+      {/* Export PDF button 👇 */}
+      <div className="mt-6">
+        <ExportPDFButton trip={trip} />
+      </div>
 
       {/* Chat shows only for group trips and floats bottom-right */}
       {trip?.partyType !== "solo" && (
