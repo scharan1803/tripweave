@@ -1,194 +1,180 @@
-'use client';
+"use client";
 
-import { useEffect, useMemo, useState, useCallback } from 'react';
-import { updateTripMeta } from '../lib/db';
+import { useEffect, useMemo, useState } from "react";
 
-const VIBES = ['adventure', 'camping', 'local', 'culture', 'relax'];
-const TRANSPORTS = ['flights', 'rail', 'rental', 'own'];
+const VIBES = ["camping", "local attractions", "adventure", "culture", "relaxation & luxury"];
+const TRANSPORT = ["own vehicle", "rental car", "flights", "rail"];
+const PARTY = ["solo", "group"];
 
-/* -------- helpers -------- */
-function shapeFromTrip(trip) {
-  return {
-    name: trip?.name || 'Untitled Trip',
-    location: trip?.destination || trip?.location || '',
-    nights: Number(trip?.nights ?? 1),
-    startDate: trip?.startDate || '', // "YYYY-MM-DD"
-    vibe: trip?.vibe || 'adventure',
-    transport: trip?.transport || 'flights',
-    partyType: trip?.partyType || 'solo',           // NEW
-    budgetModel: trip?.budgetModel || 'individual', // NEW
-  };
-}
-function isEqual(a, b) {
-  return (
-    a.name === b.name &&
-    a.location === b.location &&
-    Number(a.nights) === Number(b.nights) &&
-    a.vibe === b.vibe &&
-    a.transport === b.transport &&
-    a.startDate === b.startDate &&
-    a.partyType === b.partyType &&
-    a.budgetModel === b.budgetModel
-  );
-}
-function addDays(isoYYYYMMDD, days) {
-  if (!isoYYYYMMDD) return '';
-  const [y, m, d] = isoYYYYMMDD.split('-').map(Number);
-  const dt = new Date(Date.UTC(y, (m || 1) - 1, d || 1));
-  if (Number.isNaN(dt.getTime())) return '';
-  dt.setUTCDate(dt.getUTCDate() + days);
-  const y2 = dt.getUTCFullYear();
-  const m2 = String(dt.getUTCMonth() + 1).padStart(2, '0');
-  const d2 = String(dt.getUTCDate()).padStart(2, '0');
-  return `${y2}-${m2}-${d2}`;
-}
+export default function TripMetaEditor({ trip, onSubmit }) {
+  const [local, setLocal] = useState(() => ({
+    name: trip?.name || "Untitled Trip",
+    origin: trip?.origin || "",
+    destination: trip?.destination || "",
+    nights: Number(trip?.nights ?? 4),
+    startDate: trip?.startDate || "",
+    endDate: trip?.endDate || "",
+    vibe: trip?.vibe || "adventure",
+    transport: trip?.transport || "flights",
+    partyType: trip?.partyType || "solo",
+  }));
 
-export default function TripMetaEditor({ trip, onChange }) {
-  const initial = useMemo(() => shapeFromTrip(trip), [trip?.id]);
-  const [form, setForm] = useState(initial);
-  const [baseline, setBaseline] = useState(initial);
-  const [status, setStatus] = useState(''); // '', 'saving', 'saved'
-
+  // Keep in sync when trip changes externally
   useEffect(() => {
-    const next = shapeFromTrip(trip);
-    setForm(next);
-    setBaseline(next);
-    setStatus('');
-  }, [trip?.id]);
-
-  const dirty = useMemo(() => !isEqual(form, baseline), [form, baseline]);
-
-  const endDate = useMemo(() => {
-    return form.startDate ? addDays(form.startDate, Number(form.nights || 1)) : '';
-  }, [form.startDate, form.nights]);
-
-  function updateField(key, value) {
-    setForm((prev) => {
-      // If switching to solo, force budgetModel to 'individual'
-      if (key === 'partyType') {
-        const pt = value;
-        const forcedBudgetModel = pt === 'solo' ? 'individual' : prev.budgetModel;
-        return { ...prev, partyType: pt, budgetModel: forcedBudgetModel };
-      }
-      return { ...prev, [key]: value };
+    setLocal({
+      name: trip?.name || "Untitled Trip",
+      origin: trip?.origin || "",
+      destination: trip?.destination || "",
+      nights: Number(trip?.nights ?? 4),
+      startDate: trip?.startDate || "",
+      endDate: trip?.endDate || "",
+      vibe: trip?.vibe || "adventure",
+      transport: trip?.transport || "flights",
+      partyType: trip?.partyType || "solo",
     });
-    setStatus('');
-  }
+  }, [trip]);
 
-  const handleSave = useCallback(() => {
-    if (!trip?.id || !dirty) return;
-    setStatus('saving');
+  // Minimal validation: destination required, nights >= 1
+  const isValid =
+    local.destination.trim().length > 0 &&
+    Number(local.nights) > 0;
 
-    // Ensure solo always carries individual budget model
-    const payload = {
-      ...form,
-      nights: Number(form.nights || 1),
-      endDate,
-      budgetModel: form.partyType === 'solo' ? 'individual' : form.budgetModel || 'individual',
+  // Dirty check (for the helper text)
+  const dirty = useMemo(() => {
+    return (
+      local.name !== (trip?.name || "Untitled Trip") ||
+      local.origin !== (trip?.origin || "") ||
+      local.destination !== (trip?.destination || "") ||
+      Number(local.nights) !== Number(trip?.nights ?? 4) ||
+      local.startDate !== (trip?.startDate || "") ||
+      local.endDate !== (trip?.endDate || "") ||
+      local.vibe !== (trip?.vibe || "adventure") ||
+      local.transport !== (trip?.transport || "flights") ||
+      local.partyType !== (trip?.partyType || "solo")
+    );
+  }, [local, trip]);
+
+  // Atomic submit: send all fields together (prevents the "enter twice" issue)
+  function commit() {
+    if (!isValid) return;
+
+    const updates = {
+      name: (local.name || "").trim() || "Untitled Trip",
+      origin: (local.origin || "").trim(),        // optional
+      destination: (local.destination || "").trim(),
+      nights: Math.max(1, Number(local.nights)),
+      startDate: local.startDate || "",
+      endDate: local.endDate || "",
+      vibe: local.vibe,
+      transport: local.transport,
+      partyType: local.partyType,
+      // Solo always forces individual; group can change later
+      budgetModel: local.partyType === "solo" ? "individual" : (trip?.budgetModel || "individual"),
+      updatedAt: Date.now(),
     };
 
-    const updated = updateTripMeta(trip.id, payload);
-    const shaped = shapeFromTrip(updated || { ...trip, ...payload });
-    setBaseline(shaped);
-    setStatus('saved');
-    onChange?.(updated);
-    setTimeout(() => setStatus(''), 900);
-  }, [trip?.id, dirty, form, endDate, onChange, trip]);
-
-  // Ctrl/Cmd + S
-  useEffect(() => {
-    function onKeyDown(e) {
-      const isCmdS = (e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S');
-      if (isCmdS) {
-        e.preventDefault();
-        handleSave();
-      }
-    }
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [handleSave]);
+    onSubmit?.(updates);
+  }
 
   return (
-    <div className="card">
-      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-        <div className="w-full md:max-w-xl">
-          <input
-            className="input text-xl font-semibold"
-            value={form.name}
-            onChange={(e) => updateField('name', e.target.value)}
-            aria-label="Trip name"
-          />
-          <p className="mt-1 text-sm text-gray-500">
-            Last updated {trip?.updatedAt ? new Date(trip.updatedAt).toLocaleString() : '—'}
-          </p>
-        </div>
-
-        <div className="flex items-center gap-3">
-          <span className="h-6 text-sm text-gray-500">
-            {status === 'saving' && 'Saving…'}
-            {status === 'saved' && 'Saved ✓'}
-            {!status && dirty && <span className="text-gray-400">Unsaved changes</span>}
-          </span>
-          <button
-            onClick={handleSave}
-            disabled={!dirty || status === 'saving'}
-            className={`btn ${(!dirty || status === 'saving') ? 'btn-disabled' : 'btn-primary'}`}
-            title="Update (Ctrl/Cmd+S)"
-          >
-            Update
-          </button>
-        </div>
+    <section className="mx-auto max-w-5xl rounded-2xl border border-gray-100 bg-white p-6 shadow-sm">
+      <div className="flex items-center justify-between gap-4">
+        <h2 className="text-xl font-semibold">Trip</h2>
+        <button
+          onClick={commit}
+          disabled={!isValid}
+          className={`rounded-lg px-4 py-2 text-sm font-semibold ${
+            isValid
+              ? "bg-gray-900 text-white hover:bg-black"
+              : "bg-gray-200 text-gray-500 cursor-not-allowed"
+          }`}
+        >
+          {trip?.submitted ? "Update" : "Submit"}
+        </button>
       </div>
 
-      <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
-        <label className="flex flex-col gap-1">
-          <span className="text-sm text-gray-600">Location</span>
-          <input
-            className="input"
-            value={form.location}
-            onChange={(e) => updateField('location', e.target.value)}
-            placeholder="e.g., Banff"
-          />
-        </label>
+      <p className="mt-1 text-xs text-gray-500">
+        Last updated {trip?.updatedAt ? new Date(trip.updatedAt).toLocaleString() : "—"}
+      </p>
 
-        <label className="flex flex-col gap-1">
-          <span className="text-sm text-gray-600">Nights</span>
+      <div className="mt-4 grid gap-4 md:grid-cols-2">
+        {/* Title */}
+        <div className="md:col-span-2">
+          <label className="block text-sm font-medium text-gray-700">Title</label>
+          <input
+            type="text"
+            className="mt-1 w-full rounded-lg border border-gray-200 p-2"
+            value={local.name}
+            onChange={(e) => setLocal((s) => ({ ...s, name: e.target.value }))}
+          />
+        </div>
+
+        {/* Origin (optional) */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700">Origin (optional)</label>
+          <input
+            type="text"
+            className="mt-1 w-full rounded-lg border border-gray-200 p-2"
+            placeholder="Toronto"
+            value={local.origin}
+            onChange={(e) => setLocal((s) => ({ ...s, origin: e.target.value }))}
+          />
+        </div>
+
+        {/* Destination (required) */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700">Destination *</label>
+          <input
+            type="text"
+            className="mt-1 w-full rounded-lg border border-gray-200 p-2"
+            placeholder="Banff"
+            value={local.destination}
+            onChange={(e) => setLocal((s) => ({ ...s, destination: e.target.value }))}
+          />
+        </div>
+
+        {/* Nights */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700">Nights</label>
           <input
             type="number"
             min={1}
-            className="input"
-            value={form.nights}
-            onChange={(e) => updateField('nights', Math.max(1, Number(e.target.value || 1)))}
-          />
-        </label>
-
-        <label className="flex flex-col gap-1">
-          <span className="text-sm text-gray-600">Start date</span>
-          <input
-            type="date"
-            className="input"
-            value={form.startDate}
-            onChange={(e) => updateField('startDate', e.target.value)}
-          />
-        </label>
-
-        <div className="flex flex-col gap-1">
-          <span className="text-sm text-gray-600">End date</span>
-          <input
-            className="input"
-            value={endDate || ''}
-            readOnly
-            placeholder="—"
-            title={endDate ? 'Computed from start date + nights' : 'Set start date to compute'}
+            className="mt-1 w-full rounded-lg border border-gray-200 p-2"
+            value={local.nights}
+            onChange={(e) =>
+              setLocal((s) => ({ ...s, nights: Math.max(1, Number(e.target.value || 1)) }))
+            }
           />
         </div>
 
-        <label className="flex flex-col gap-1">
-          <span className="text-sm text-gray-600">Vibe</span>
+        {/* Dates */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700">Start date</label>
+          <input
+            type="date"
+            className="mt-1 w-full rounded-lg border border-gray-200 p-2"
+            value={local.startDate}
+            onChange={(e) => setLocal((s) => ({ ...s, startDate: e.target.value }))}
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-gray-700">End date</label>
+          <input
+            type="date"
+            className="mt-1 w-full rounded-lg border border-gray-200 p-2"
+            value={local.endDate}
+            onChange={(e) => setLocal((s) => ({ ...s, endDate: e.target.value }))}
+          />
+        </div>
+
+        {/* Vibe */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700">Vibe</label>
           <select
-            className="select"
-            value={form.vibe}
-            onChange={(e) => updateField('vibe', e.target.value)}
+            className="mt-1 w-full rounded-lg border border-gray-200 p-2"
+            value={local.vibe}
+            onChange={(e) => setLocal((s) => ({ ...s, vibe: e.target.value }))}
           >
             {VIBES.map((v) => (
               <option key={v} value={v}>
@@ -196,73 +182,49 @@ export default function TripMetaEditor({ trip, onChange }) {
               </option>
             ))}
           </select>
-        </label>
+        </div>
 
-        <label className="flex flex-col gap-1">
-          <span className="text-sm text-gray-600">Transport</span>
+        {/* Transport */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700">Transport</label>
           <select
-            className="select"
-            value={form.transport}
-            onChange={(e) => updateField('transport', e.target.value)}
+            className="mt-1 w-full rounded-lg border border-gray-200 p-2"
+            value={local.transport}
+            onChange={(e) => setLocal((s) => ({ ...s, transport: e.target.value }))}
           >
-            {TRANSPORTS.map((t) => (
+            {TRANSPORT.map((t) => (
               <option key={t} value={t}>
                 {t}
               </option>
             ))}
           </select>
-        </label>
+        </div>
 
-        {/* NEW: Party Type */}
-        <label className="flex flex-col gap-1 md:col-span-2">
-          <span className="text-sm text-gray-600">Party</span>
+        {/* Party */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700">Party</label>
           <select
-            className="select"
-            value={form.partyType}
-            onChange={(e) => updateField('partyType', e.target.value)}
+            className="mt-1 w-full rounded-lg border border-gray-200 p-2"
+            value={local.partyType}
+            onChange={(e) => setLocal((s) => ({ ...s, partyType: e.target.value }))}
           >
-            <option value="solo">Solo</option>
-            <option value="group">Group</option>
+            {PARTY.map((p) => (
+              <option key={p} value={p}>
+                {p[0].toUpperCase() + p.slice(1)}
+              </option>
+            ))}
           </select>
-        </label>
-
-        {/* NEW: Budget Model (only when group) */}
-        {form.partyType === 'group' && (
-          <fieldset className="md:col-span-2">
-            <legend className="mb-2 text-sm text-gray-600">Budget model</legend>
-            <div className="flex items-center gap-4">
-              <label className="flex items-center gap-2">
-                <input
-                  type="radio"
-                  name="budgetModel"
-                  value="individual"
-                  checked={form.budgetModel === 'individual'}
-                  onChange={() => updateField('budgetModel', 'individual')}
-                />
-                <span className="text-sm">Individual</span>
-              </label>
-              <label className="flex items-center gap-2">
-                <input
-                  type="radio"
-                  name="budgetModel"
-                  value="group"
-                  checked={form.budgetModel === 'group'}
-                  onChange={() => updateField('budgetModel', 'group')}
-                />
-                <span className="text-sm">Group</span>
-              </label>
-            </div>
-          </fieldset>
-        )}
+          <p className="mt-1 text-xs text-gray-500">
+            Solo trips enforce individual budget; group trips can use group or individual later.
+          </p>
+        </div>
       </div>
 
-      {form.startDate && endDate && (
-        <p className="mt-3 text-sm text-gray-600">
-          Trip window: <span className="font-medium">{form.startDate}</span> →{' '}
-          <span className="font-medium">{endDate}</span>
-          {' '}({Number(form.nights)} night{Number(form.nights) > 1 ? 's' : ''})
+      {dirty && (
+        <p className="mt-3 text-xs text-indigo-600">
+          You have unsaved changes. Click {trip?.submitted ? "Update" : "Submit"} to apply.
         </p>
       )}
-    </div>
+    </section>
   );
 }

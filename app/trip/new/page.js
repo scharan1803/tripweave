@@ -1,216 +1,57 @@
 "use client";
-import { saveDraft, saveTrip, clearDraft } from "../../lib/storage";
-import { useEffect, useMemo, useState } from "react";
+
+import { useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import PromptCard from "../../components/PromptCard";
-import WizardProgress from "../../components/WizardProgress";
-import { createWizardState, wizardValidators } from "../../lib/state";
+import { saveTrip, saveDraft } from "../../lib/storage";
 
-const TOTAL_STEPS = 6;
-
-export default function NewTripWizard() {
+export default function NewTripPage() {
   const router = useRouter();
-  const search = useSearchParams();
+  const params = useSearchParams();
 
-  // In-memory state for MVP (later we’ll swap to a store without changing callers)
-  const [state, setState] = useState(() => createWizardState());
-  const [step, setStep] = useState(1);
-
-  // Prefill destination from home page query (?destination=Banff)
   useEffect(() => {
-    const prefill = search.get("destination");
-    if (prefill) setState((s) => ({ ...s, destination: prefill }));
-  }, [search]);
-  // Auto-save the wizard draft to localStorage whenever fields change
-  useEffect(() => {
-    const draftTrip = {
-      destination: state.destination,
-      partyType: state.partyType,
-      transport: state.transport,
-      budgetModel: state.budgetModel,
-      nights: Number(state.nights),
-      vibe: state.vibe,
-    };
-   saveDraft(draftTrip);
-}, [state.destination, state.partyType, state.transport, state.budgetModel, state.nights, state.vibe]);
-
-  const canNext = useMemo(() => {
-    switch (step) {
-      case 1: return wizardValidators.destination(state.destination);
-      case 5: return wizardValidators.nights(state.nights);
-      default: return true;
-    }
-  }, [step, state.destination, state.nights]);
-
-  const next = () => setStep((s) => Math.min(TOTAL_STEPS, s + 1));
-  const back = () => setStep((s) => Math.max(1, s - 1));
-
-  const finish = () => {
-    // For MVP, just navigate to a draft URL. In Week 2 we’ll save to Firestore.
+    const destination = (params.get("destination") || "").trim();
     const id = `draft-${Date.now()}`;
-    const trip = {
-    destination: state.destination,
-    partyType: state.partyType,
-    transport: state.transport,
-    budgetModel: state.budgetModel,
-    nights: Number(state.nights),
-    vibe: state.vibe,
-    origin: "Toronto",     // temporary placeholder
-    createdAt: Date.now(), // timestamp
-  };
 
-  saveTrip(id, trip);  // write final trip to localStorage
-  clearDraft();        // clear the in-progress draft
+    // Minimal seed; TripClient normalizes (activities by nights, etc.)
+    const initial = {
+      id,
+      name: "Untitled Trip",
+      origin: "",
+      destination,               // ← preserve what user typed on landing
+      nights: 4,
+      startDate: "",
+      endDate: "",
+      vibe: "adventure",
+      transport: "flights",
+      partyType: "solo",
+      budgetModel: "individual",
+      participants: [],
+      participantBudgets: {},
+      budget: { currency: "USD" },
+      activities: [],            // TripClient will seed based on nights
+      chat: [],
+      ownerId: "you@example.com",
+      submitted: false,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
 
-    
-    router.push(`/trip/${id}`);
-  };
+    try {
+      // ✅ Save under your real keys so TripClient can load it
+      saveTrip(id, initial);     // -> "tripweave:trip:<id>"
+      saveDraft(initial);        // -> "tripweave:draft" (optional convenience)
+    } catch (err) {
+      console.error("Failed to seed draft", err);
+    }
+
+    // Slight delay to ensure localStorage write is committed before navigation
+    const t = setTimeout(() => router.replace(`/trip/${id}`), 0);
+    return () => clearTimeout(t);
+  }, [params, router]);
 
   return (
-    <div>
-      <WizardProgress step={step} total={TOTAL_STEPS} />
-
-      {step === 1 && (
-        <PromptCard title="Where are you planning to vacay?">
-          <input
-            className="w-full rounded-xl border border-gray-300 px-4 py-3"
-            placeholder="e.g., Banff"
-            value={state.destination}
-            onChange={(e) => setState((s) => ({ ...s, destination: e.target.value }))}
-          />
-        </PromptCard>
-      )}
-
-      {step === 2 && (
-        <PromptCard title="Is it a solo trip or with friends?">
-          <div className="flex flex-wrap gap-3">
-            {[
-              { id: "solo", label: "Solo" },
-              { id: "group", label: "Group" },
-            ].map((opt) => (
-              <button
-                key={opt.id}
-                onClick={() => setState((s) => ({ ...s, partyType: opt.id }))}
-                className={`px-4 py-2 rounded-xl border ${state.partyType === opt.id ? "bg-gray-900 text-white" : "bg-white"}`}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
-        </PromptCard>
-      )}
-
-      {step === 3 && (
-        <PromptCard title="How are you getting there?">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            {[
-              { id: "vehicle", label: "Own vehicle" },
-              { id: "rental", label: "Rental car" },
-              { id: "flights", label: "Flights" },
-              { id: "rail", label: "Rail" },
-            ].map((opt) => (
-              <button
-                key={opt.id}
-                onClick={() => setState((s) => ({ ...s, transport: opt.id }))}
-                className={`px-4 py-2 rounded-xl border ${state.transport === opt.id ? "bg-gray-900 text-white" : "bg-white"}`}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
-        </PromptCard>
-      )}
-
-      {step === 4 && (
-        <PromptCard title="How do you want to budget?">
-          <div className="flex gap-3">
-            {[
-              { id: "individual", label: "Individual budgets" },
-              { id: "group", label: "One group budget" },
-            ].map((opt) => (
-              <button
-                key={opt.id}
-                onClick={() => setState((s) => ({ ...s, budgetModel: opt.id }))}
-                className={`px-4 py-2 rounded-xl border ${state.budgetModel === opt.id ? "bg-gray-900 text-white" : "bg-white"}`}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
-        </PromptCard>
-      )}
-
-      {step === 5 && (
-        <PromptCard title="How long are you planning to stay?">
-          <div className="flex items-center gap-3">
-            <input
-              type="number"
-              min={1}
-              className="w-28 rounded-xl border border-gray-300 px-4 py-2"
-              value={state.nights}
-              onChange={(e) => setState((s) => ({ ...s, nights: e.target.value }))}
-            />
-            <span className="text-gray-700">night(s)</span>
-          </div>
-        </PromptCard>
-      )}
-
-      {step === 6 && (
-        <PromptCard title="What’s the vibe of the trip?">
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-            {[
-              { id: "camping", label: "Camping" },
-              { id: "attractions", label: "Local attractions" },
-              { id: "culture", label: "Culture" },
-              { id: "luxury", label: "Relaxation & luxury" },
-              { id: "adventure", label: "Adventure" },
-            ].map((opt) => (
-              <button
-                key={opt.id}
-                onClick={() => setState((s) => ({ ...s, vibe: opt.id }))}
-                className={`px-4 py-2 rounded-xl border ${state.vibe === opt.id ? "bg-gray-900 text-white" : "bg-white"}`}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
-        </PromptCard>
-      )}
-
-      {/* Controls */}
-      <div className="flex items-center justify-between mt-6">
-        <button
-          onClick={back}
-          disabled={step === 1}
-          className="px-4 py-2 rounded-xl border disabled:opacity-50"
-        >
-          Back
-        </button>
-
-        {step < TOTAL_STEPS ? (
-          <button
-            onClick={next}
-            disabled={!canNext}
-            className="px-4 py-2 rounded-xl bg-gray-900 text-white disabled:opacity-50"
-          >
-            Next
-          </button>
-        ) : (
-          <button
-            onClick={finish}
-            className="px-4 py-2 rounded-xl bg-gray-900 text-white"
-          >
-            Finish
-          </button>
-        )}
-      </div>
-
-      {/* Live summary */}
-      <div className="mt-6 text-sm text-gray-600">
-        <p>
-          <strong>Preview:</strong> {state.destination} · {state.partyType} · {state.transport} · {state.budgetModel} · {state.nights} night(s) · {state.vibe}
-        </p>
-      </div>
+    <div className="mx-auto max-w-2xl p-8 text-gray-600">
+      Creating your trip…
     </div>
   );
 }
