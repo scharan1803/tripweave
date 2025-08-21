@@ -1,38 +1,94 @@
 "use client";
-import { useState } from "react";
+
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
-export default function Home() {
+export default function HomePage() {
   const router = useRouter();
-  const [destination, setDestination] = useState("Banff");
 
-  const handleStart = (e) => {
+  // Controlled input — keep it empty by default (no prefill)
+  const [destination, setDestination] = useState("");
+  const [isFocused, setIsFocused] = useState(false);
+  const [suggestIndex, setSuggestIndex] = useState(0);
+  const intervalRef = useRef(null);
+
+  // Your rotating suggestions
+  const suggestions = useMemo(
+    () => [
+      "Try Queenstown",
+      "Try Tokyo",
+      "Try Rome",
+      "Try Rio",
+      "Try Capetown",
+      "Try Montreal",
+    ],
+    []
+  );
+
+  // Start/stop rotation depending on focus & whether user typed something
+  useEffect(() => {
+    const shouldRotate = !isFocused && destination.trim() === "";
+    if (shouldRotate && !intervalRef.current) {
+      intervalRef.current = setInterval(() => {
+        setSuggestIndex((i) => (i + 1) % suggestions.length);
+      }, 3000);
+    } else if (!shouldRotate && intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+    return () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+    };
+  }, [isFocused, destination, suggestions.length]);
+
+  const placeholder = suggestions[suggestIndex];
+
+  function onSubmit(e) {
     e.preventDefault();
-    const q = new URLSearchParams({ destination }).toString();
-    router.push(`/trip/new?${q}`);
-  };
+    const dest = destination.trim();
+    if (!dest) return;
+    router.push(`/trip/new?destination=${encodeURIComponent(dest)}`);
+  }
 
   return (
-    <div className="max-w-5xl mx-auto px-4 py-10">
-      <div className="bg-white rounded-2xl shadow-md border border-gray-100 p-8">
-        <h1 className="text-2xl md:text-3xl font-bold mb-2">Where are you planning to vacay?</h1>
-        <p className="text-gray-600 mb-6">Type a place and we’ll turn it into a plan you can share.</p>
+    <div className="min-h-[70vh] grid place-items-center">
+      <div className="w-full max-w-2xl text-center">
+        <h1 className="mb-4 text-3xl font-bold tracking-tight text-gray-900">
+          Where are you planning to vacay?
+        </h1>
 
-        <form onSubmit={handleStart} className="flex flex-col md:flex-row gap-3">
+        <form onSubmit={onSubmit} className="flex items-stretch gap-2">
           <input
-            className="flex-1 rounded-xl border border-gray-300 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-gray-300"
-            placeholder="Try: Banff"
+            type="text"
+            inputMode="text"
+            autoComplete="off"
             value={destination}
             onChange={(e) => setDestination(e.target.value)}
-            required
+            onFocus={() => setIsFocused(true)}
+            onBlur={() => setIsFocused(false)}
+            placeholder={placeholder}
+            aria-label="Destination"
+            className="flex-1 rounded-xl border border-gray-300 bg-white px-4 py-3 text-base outline-none transition focus:border-gray-900"
           />
           <button
             type="submit"
-            className="rounded-xl px-5 py-3 bg-gray-900 text-white hover:opacity-90"
+            disabled={destination.trim() === ""}
+            className={`rounded-xl px-5 py-3 text-sm font-semibold transition ${
+              destination.trim()
+                ? "bg-gray-900 text-white hover:bg-black"
+                : "bg-gray-200 text-gray-500 cursor-not-allowed"
+            }`}
           >
-            Start planning
+            Plan
           </button>
         </form>
+
+        <p className="mt-3 text-sm text-gray-500">
+          click the box and type your dream destination
+        </p>
       </div>
     </div>
   );

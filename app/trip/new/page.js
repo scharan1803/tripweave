@@ -1,57 +1,61 @@
 "use client";
 
-import { useEffect } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
-import { saveTrip, saveDraft } from "../../lib/storage";
+import { Suspense, useEffect } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
+import { saveTrip } from "../../lib/storage";
 
-export default function NewTripPage() {
+function NewTripInner() {
   const router = useRouter();
   const params = useSearchParams();
 
   useEffect(() => {
+    // Read ?destination=... (if any)
     const destination = (params.get("destination") || "").trim();
-    const id = `draft-${Date.now()}`;
 
-    // Minimal seed; TripClient normalizes (activities by nights, etc.)
+    // Create a fresh draft trip and persist it so /trip/[id] can load it
+    const id = `draft-${Date.now()}`;
     const initial = {
       id,
-      name: "Untitled Trip",
       origin: "",
-      destination,               // ← preserve what user typed on landing
-      nights: 4,
+      destination,
+      nights: 3,
       startDate: "",
       endDate: "",
-      vibe: "adventure",
       transport: "flights",
+      vibe: "adventure",
+      activities: [],            // TripClient will seed if empty
+      participants: [],
+      chat: [],
+      media: [],
+      budget: { currency: "USD", daily: undefined },
+      participantBudgets: {},
       partyType: "solo",
       budgetModel: "individual",
-      participants: [],
-      participantBudgets: {},
-      budget: { currency: "USD" },
-      activities: [],            // TripClient will seed based on nights
-      chat: [],
-      ownerId: "you@example.com",
+      ownerId: "anon@local",
       submitted: false,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
 
-    try {
-      // ✅ Save under your real keys so TripClient can load it
-      saveTrip(id, initial);     // -> "tripweave:trip:<id>"
-      saveDraft(initial);        // -> "tripweave:draft" (optional convenience)
-    } catch (err) {
-      console.error("Failed to seed draft", err);
-    }
-
-    // Slight delay to ensure localStorage write is committed before navigation
-    const t = setTimeout(() => router.replace(`/trip/${id}`), 0);
-    return () => clearTimeout(t);
+    saveTrip(id, initial);
+    router.replace(`/trip/${id}`);
   }, [params, router]);
 
   return (
-    <div className="mx-auto max-w-2xl p-8 text-gray-600">
-      Creating your trip…
+    <div className="mx-auto max-w-xl rounded-xl border border-gray-200 bg-white p-6 text-sm text-gray-600">
+      Preparing your trip…
     </div>
+  );
+}
+
+export default function NewTripPage() {
+  return (
+    <Suspense fallback={
+      <div className="mx-auto max-w-xl rounded-xl border border-gray-200 bg-white p-6 text-sm text-gray-600">
+        Loading…
+      </div>
+    }>
+      <NewTripInner />
+    </Suspense>
   );
 }
