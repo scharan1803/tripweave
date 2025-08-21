@@ -10,6 +10,7 @@ import TripMetaEditor from "../../components/TripMetaEditor";
 import BudgetPanel from "../../components/BudgetPanel";
 import ExportPDFButton from "../../components/ExportPDFButton";
 import TripMediaGallery from "../../components/TripMediaGallery";
+import TripDocsTile from "../../components/TripDocsTile";
 import { putMediaBlob } from "../../lib/mediaStore";
 import { useAuth } from "../../context/AuthProvider";
 
@@ -66,6 +67,7 @@ export default function TripClient({ id }) {
     const participants = Array.isArray(initialRaw.participants) ? initialRaw.participants : [];
     const chat = Array.isArray(initialRaw.chat) ? initialRaw.chat : [];
     const media = Array.isArray(initialRaw.media) ? initialRaw.media : [];
+    const docs = Array.isArray(initialRaw.docs) ? initialRaw.docs : []; // NEW
 
     const budget =
       initialRaw.budget && typeof initialRaw.budget === "object"
@@ -89,6 +91,7 @@ export default function TripClient({ id }) {
       participants,
       chat,
       media,
+      docs, // NEW
       budget,
       participantBudgets,
       partyType,
@@ -97,9 +100,7 @@ export default function TripClient({ id }) {
       submitted,
     };
     setTrip(initial);
-
-    // Save normalized shape (safe even if signed out; it mirrors existing local data)
-    saveTrip(id, initial);
+    saveTrip(id, initial); // normalize
   }, [id, mounted]);
 
   if (!mounted || loading) return <div className="text-sm text-gray-500">Loading…</div>;
@@ -128,7 +129,6 @@ export default function TripClient({ id }) {
   }
 
   function persist(next) {
-    // Only persist user-initiated changes when signed in
     if (!canEdit) {
       alert("Please sign in to make changes.");
       return;
@@ -205,13 +205,11 @@ export default function TripClient({ id }) {
   function currentMediaBytes() {
     return (trip.media || []).reduce((sum, m) => sum + (m.size || 0), 0);
   }
-
   async function addTripMedia(files) {
     if (!canEdit) {
       alert("Please sign in to upload media.");
       return [];
     }
-
     const list = Array.from(files || []);
     if (list.length === 0) return [];
 
@@ -265,7 +263,6 @@ export default function TripClient({ id }) {
       persist(next);
     });
   }
-
   async function handleChatSend(text, files) {
     if (!canEdit) {
       alert("Please sign in to send messages.");
@@ -282,7 +279,7 @@ export default function TripClient({ id }) {
     }
   }
 
-  // Meta submit
+  // Trip meta submit
   function handleSubmit(updates) {
     guardOr(() => {
       const base = { ...trip, ...(updates || {}) };
@@ -305,6 +302,35 @@ export default function TripClient({ id }) {
         submitted: true,
         updatedAt: Date.now(),
       };
+      persist(next);
+    });
+  }
+
+  // Docs (NEW)
+  function addDoc(doc) {
+    guardOr(() => {
+      const next = structuredClone(trip);
+      next.docs = Array.isArray(next.docs) ? next.docs : [];
+      next.docs.unshift(doc);
+      next.updatedAt = Date.now();
+      persist(next);
+    });
+  }
+
+  function removeDoc(docId) {
+    guardOr(() => {
+      const next = structuredClone(trip);
+      next.docs = (next.docs || []).filter((d) => d.id !== docId);
+      next.updatedAt = Date.now();
+      persist(next);
+    });
+  }
+
+  function updateDoc(docId, updated) {
+    guardOr(() => {
+      const next = structuredClone(trip);
+      next.docs = (next.docs || []).map((d) => (d.id === docId ? { ...d, ...updated, updatedAt: Date.now() } : d));
+      next.updatedAt = Date.now();
       persist(next);
     });
   }
@@ -334,13 +360,20 @@ export default function TripClient({ id }) {
               partyType={trip.partyType || "solo"}
               onAddMedia={addTripMedia}
             />
-            <div className="bg-white rounded-2xl shadow-md border border-gray-100 p-5">
+            <div className="rounded-2xl border border-gray-100 bg-white p-5 shadow-md">
               <TransportLinks mode={mode} origin={origin || "Origin"} destination={destination || "Destination"} />
             </div>
           </section>
 
-          {/* Budget + Participants */}
+          {/* Docs + Budget + Participants */}
           <section className="grid gap-6 md:grid-cols-2">
+            <TripDocsTile
+              docs={trip.docs || []}
+              canEdit={canEdit}
+              onAdd={addDoc}
+              onRemove={removeDoc}
+              onUpdate={updateDoc}
+            />
             <BudgetPanel
               partyType={trip.partyType || "solo"}
               participants={trip.participants || []}
@@ -370,12 +403,16 @@ export default function TripClient({ id }) {
               ownerId={trip.ownerId}
               currentUserId={currentUserId}
             />
+          </section>
 
+          {/* Participants */}
+          <section className="grid gap-6 md:grid-cols-2">
             <ParticipantsPanel
               participants={trip.participants || []}
               onAdd={addParticipant}
               onRemove={removeParticipant}
             />
+            <div className="hidden md:block" />
           </section>
 
           {/* Day tiles */}
@@ -395,12 +432,12 @@ export default function TripClient({ id }) {
             </div>
           </section>
 
-          <div className="mt-6">
+          <div className="mt-6 flex items-center gap-3">
             <ExportPDFButton trip={trip} />
           </div>
 
           {/* Chat only when signed in and group */}
-          {canEdit && trip?.partyType !== "solo" && (
+          {!!canEdit && trip?.partyType !== "solo" && (
             <ChatBox
               me={currentUserId}
               tripId={trip.id}
@@ -414,7 +451,7 @@ export default function TripClient({ id }) {
         </>
       ) : (
         <section className="rounded-2xl border border-dashed border-gray-200 bg-white p-6 text-sm text-gray-600">
-          Fill the trip details above and click <strong>Submit</strong> to expand the itinerary, media, budget,
+          Fill the trip details above and click <strong>Submit</strong> to expand the itinerary, docs, media, budget,
           participants and chat sections.
           {!canEdit && <div className="mt-2 text-red-500">Sign in to save your trip and make changes.</div>}
         </section>

@@ -1,25 +1,18 @@
 // app/lib/firebaseClient.js
-// Single Firebase client app for the browser.
-
-import { initializeApp, getApps } from "firebase/app";
+import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth, GoogleAuthProvider } from "firebase/auth";
 
-// ⛳ Replace the values below with your Firebase Web App config
 const firebaseConfig = {
-  apiKey: "AIzaSyDhhJGu3Y8Wq7rgRuMpdl6DWNYwqnTRXIg",
-  authDomain: "tripweave-b309c.firebaseapp.com",
-  projectId: "tripweave-b309c",
-  storageBucket: "tripweave-b309c.firebasestorage.app",
-  messagingSenderId: "337865185021",
-  appId: "1:337865185021:web:0e791c4383aaabfb155094",
+  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
+  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
+  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
 };
 
-let app;
-if (!getApps().length) {
-  app = initializeApp(firebaseConfig);
-} else {
-  app = getApps()[0];
-}
+const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
+export default app;
