@@ -1,12 +1,15 @@
-'use client';
+// app/components/ItineraryDay.jsx
+"use client";
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from "react";
 
 /**
  * Props:
  * - dayNumber: number (1-based)
  * - activities: string[]
- * - summary?: string   // optional; placeholder shown if absent
+ * - summary?: string
+ * - weather?: { icon: string, temp: number, unit: "C"|"F", desc?: string } | null
+ * - weatherLoading?: boolean
  * - onAdd(text: string)
  * - onEdit(index: number, text: string)
  * - onRemove(index: number)
@@ -16,61 +19,63 @@ export default function ItineraryDay({
   dayNumber,
   activities = [],
   summary,
+  weather = null,
+  weatherLoading = false,
   onAdd,
   onEdit,
   onRemove,
   onMove,
 }) {
-  // Modal open/close
   const [open, setOpen] = useState(false);
+  const [input, setInput] = useState("");
+  const [editing, setEditing] = useState({ index: -1, value: "" });
 
-  // Inline editor state (inside modal)
-  const [input, setInput] = useState('');
-  const [editing, setEditing] = useState({ index: -1, value: '' });
-
-  // Focus modal on open
   const modalRef = useRef(null);
-  useEffect(() => {
-    if (open) modalRef.current?.focus();
-  }, [open]);
+  useEffect(() => { if (open) modalRef.current?.focus(); }, [open]);
 
-  // ----- summary (placeholder for future AI integration) -----
   const daySummary =
     (summary && summary.trim()) ||
     (activities.length
-      ? `Planned: ${activities[0]}${activities[1] ? `, ${activities[1]}` : ''}${activities.length > 2 ? '…' : ''}`
-      : 'Day summary will appear here after AI planning.');
+      ? `Planned: ${activities[0]}${activities[1] ? `, ${activities[1]}` : ""}${
+          activities.length > 2 ? "…" : ""
+        }`
+      : "Day summary will appear here after AI planning.");
 
-  // ----- tile view (compact square) -----
   return (
     <>
+      {/* Tile */}
       <button
         className="group relative aspect-square rounded-2xl border border-gray-200 bg-white p-4 text-left shadow-sm hover:shadow-md focus:outline-none focus:ring-2 focus:ring-slate-300"
         onClick={() => setOpen(true)}
-        onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && setOpen(true)}
+        onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && setOpen(true)}
         aria-haspopup="dialog"
         aria-label={`Open Day ${dayNumber}`}
       >
-        <div className="flex h-full flex-col">
-          <div className="mb-2 flex items-center justify-between">
-            <span className="inline-flex items-center gap-2 text-sm font-semibold">
-              Day {dayNumber}
-            </span>
+        {/* Header row (title + weather badge) */}
+        <div className="mb-2 flex items-center justify-between">
+          <span className="inline-flex items-center gap-2 text-sm font-semibold">
+            Day {dayNumber}
+          </span>
+
+          <div className="flex items-center gap-2">
+            {/* Weather badge (never overlaps text) */}
+            <WeatherBadge weather={weather} loading={weatherLoading} />
+
             <span className="rounded-full border border-gray-200 px-2 py-0.5 text-xs text-gray-500">
               {activities.length} items
             </span>
           </div>
-          <p className="line-clamp-3 text-sm text-gray-600">
-            {daySummary}
-          </p>
-
-          <span className="pointer-events-none absolute bottom-3 right-3 text-xs text-gray-400 opacity-0 transition group-hover:opacity-100">
-            Click to expand
-          </span>
         </div>
+
+        {/* Summary text (has room because weather is in the header row) */}
+        <p className="line-clamp-4 text-sm text-gray-700">{daySummary}</p>
+
+        <span className="pointer-events-none absolute bottom-3 right-3 text-xs text-gray-400 opacity-0 transition group-hover:opacity-100">
+          Click to expand
+        </span>
       </button>
 
-      {/* Centered modal with full day editor */}
+      {/* Modal editor */}
       {open && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-3 backdrop-blur-[2px]"
@@ -78,7 +83,6 @@ export default function ItineraryDay({
           aria-modal="true"
           aria-label={`Edit Day ${dayNumber}`}
           onClick={(e) => {
-            // click on backdrop closes
             if (e.target === e.currentTarget) setOpen(false);
           }}
         >
@@ -87,24 +91,18 @@ export default function ItineraryDay({
             tabIndex={-1}
             className="w-full max-w-2xl rounded-2xl border border-gray-200 bg-white p-4 shadow-2xl"
             onKeyDown={(e) => {
-              if (e.key === 'Escape') setOpen(false);
+              if (e.key === "Escape") setOpen(false);
             }}
           >
             {/* Modal header */}
             <div className="mb-3 flex items-center justify-between">
               <div>
                 <h3 className="text-lg font-semibold">Day {dayNumber}</h3>
-                <p className="text-sm text-gray-600">
-                  {daySummary}
-                </p>
+                <p className="text-sm text-gray-600">{daySummary}</p>
               </div>
-              <button
-                className="rounded-lg border border-gray-300 px-3 py-1 text-sm hover:bg-gray-50"
-                onClick={() => setOpen(false)}
-                aria-label="Close"
-              >
-                Close
-              </button>
+
+              {/* Weather moved to a clean pill in the header */}
+              <WeatherBadge weather={weather} loading={weatherLoading} large />
             </div>
 
             {/* Activities list */}
@@ -120,12 +118,10 @@ export default function ItineraryDay({
                       <input
                         className="input flex-1"
                         value={editing.value}
-                        onChange={(e) =>
-                          setEditing((s) => ({ ...s, value: e.target.value }))
-                        }
+                        onChange={(e) => setEditing((s) => ({ ...s, value: e.target.value }))}
                         onKeyDown={(e) => {
-                          if (e.key === 'Enter') commitEdit();
-                          if (e.key === 'Escape') cancelEdit();
+                          if (e.key === "Enter") commitEdit();
+                          if (e.key === "Escape") cancelEdit();
                           handleReorderKey(e, idx);
                         }}
                         autoFocus
@@ -167,16 +163,10 @@ export default function ItineraryDay({
                         </button>
                       </div>
 
-                      <button
-                        className="btn btn-outline"
-                        onClick={() => startEdit(idx)}
-                      >
+                      <button className="btn btn-outline" onClick={() => startEdit(idx)}>
                         Edit
                       </button>
-                      <button
-                        className="btn btn-outline"
-                        onClick={() => onRemove?.(idx)}
-                      >
+                      <button className="btn btn-outline" onClick={() => onRemove?.(idx)}>
                         Remove
                       </button>
                     </>
@@ -192,10 +182,21 @@ export default function ItineraryDay({
                 placeholder="Add activity (e.g., Lake Louise morning hike)"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
+                onKeyDown={(e) => e.key === "Enter" && handleAdd()}
               />
               <button className="btn btn-primary" onClick={handleAdd}>
                 Add
+              </button>
+            </div>
+
+            {/* Modal footer */}
+            <div className="mt-3 flex justify-end">
+              <button
+                className="rounded-lg border border-gray-300 px-3 py-1 text-sm hover:bg-gray-50"
+                onClick={() => setOpen(false)}
+                aria-label="Close"
+              >
+                Close
               </button>
             </div>
           </div>
@@ -204,42 +205,87 @@ export default function ItineraryDay({
     </>
   );
 
-  // ----- methods below -----
-
+  // ----- helpers -----
   function handleAdd() {
     const t = input.trim();
     if (!t) return;
     onAdd?.(t);
-    setInput('');
+    setInput("");
   }
 
   function startEdit(idx) {
-    setEditing({ index: idx, value: activities[idx] ?? '' });
+    setEditing({ index: idx, value: activities[idx] ?? "" });
   }
-
   function commitEdit() {
     if (editing.index < 0) return;
     const text = editing.value.trim();
-    if (text.length === 0) {
-      setEditing({ index: -1, value: '' });
+    if (!text.length) {
+      setEditing({ index: -1, value: "" });
       return;
     }
     onEdit?.(editing.index, text);
-    setEditing({ index: -1, value: '' });
+    setEditing({ index: -1, value: "" });
   }
-
   function cancelEdit() {
-    setEditing({ index: -1, value: '' });
+    setEditing({ index: -1, value: "" });
   }
-
-  // Alt+ArrowUp / Alt+ArrowDown reorders
   function handleReorderKey(e, idx) {
     if (!onMove) return;
-    const up = e.altKey && e.key === 'ArrowUp';
-    const down = e.altKey && e.key === 'ArrowDown';
+    const up = e.altKey && e.key === "ArrowUp";
+    const down = e.altKey && e.key === "ArrowDown";
     if (!up && !down) return;
     e.preventDefault();
     const to = idx + (up ? -1 : 1);
     onMove(idx, to);
   }
+}
+
+/** Small, non-overlapping weather badge */
+function WeatherBadge({ weather, loading, large = false }) {
+  if (loading) {
+    return (
+      <span
+        className={`inline-flex items-center gap-1 rounded-full border border-gray-200 bg-gray-50 ${
+          large ? "px-3 py-1.5 text-sm" : "px-2 py-0.5 text-xs"
+        } text-gray-500`}
+        title="Loading weather…"
+      >
+        <svg
+          className={large ? "h-4 w-4 animate-spin" : "h-3 w-3 animate-spin"}
+          viewBox="0 0 24 24"
+          fill="none"
+        >
+          <circle cx="12" cy="12" r="10" stroke="currentColor" strokeOpacity="0.25" strokeWidth="4" />
+          <path
+            d="M22 12a10 10 0 0 1-10 10"
+            stroke="currentColor"
+            strokeWidth="4"
+            strokeLinecap="round"
+          />
+        </svg>
+        Loading
+      </span>
+    );
+  }
+
+  if (!weather) return null;
+
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded-full border border-gray-200 bg-gray-50 ${
+        large ? "px-3 py-1.5 text-sm" : "px-2 py-0.5 text-xs"
+      } text-gray-700`}
+      title={weather.desc || "Forecast"}
+    >
+      {/* icon */}
+      <span aria-hidden className={large ? "text-base" : "text-sm"}>
+        {weather.icon || "☀️"}
+      </span>
+      {/* temp */}
+      <span className="font-medium">
+        {typeof weather.temp === "number" ? Math.round(weather.temp) : "—"}°
+        {weather.unit || "C"}
+      </span>
+    </span>
+  );
 }

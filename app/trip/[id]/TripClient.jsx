@@ -1,6 +1,7 @@
+// app/trip/[id]/TripClient.jsx
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { loadTrip, loadDraft, saveTrip } from "../../lib/storage";
 import TransportLinks from "../../components/TransportLinks";
 import ParticipantsPanel from "../../components/ParticipantsPanel";
@@ -34,10 +35,32 @@ function fmtRange(startISO, endISO) {
   return `${s.toLocaleDateString(undefined, opts)} → ${e.toLocaleDateString(undefined, opts)}`;
 }
 
+// Make day labels from start date
+function datesBetween(startISO, endISO) {
+  try {
+    if (!startISO || !endISO) return [];
+    const out = [];
+    const s = new Date(startISO);
+    const e = new Date(endISO);
+    if (isNaN(s) || isNaN(e)) return [];
+    for (let d = new Date(s); d <= e; d.setDate(d.getDate() + 1)) {
+      out.push(new Date(d));
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 export default function TripClient({ id }) {
   const { user, loading } = useAuth();
   const [mounted, setMounted] = useState(false);
   const [trip, setTrip] = useState(null);
+
+  // weather
+  const [wx, setWx] = useState(null);      // { daily: [{date, icon, tMax, tMin, summary}], unit: "C"|"F" }
+  const [wxLoading, setWxLoading] = useState(false);
+  const [wxError, setWxError] = useState("");
 
   const canEdit = !!user;
   const currentUserId = user?.email || user?.uid || "anon@local";
@@ -67,7 +90,7 @@ export default function TripClient({ id }) {
     const participants = Array.isArray(initialRaw.participants) ? initialRaw.participants : [];
     const chat = Array.isArray(initialRaw.chat) ? initialRaw.chat : [];
     const media = Array.isArray(initialRaw.media) ? initialRaw.media : [];
-    const docs = Array.isArray(initialRaw.docs) ? initialRaw.docs : []; // NEW
+    const docs = Array.isArray(initialRaw.docs) ? initialRaw.docs : [];
 
     const budget =
       initialRaw.budget && typeof initialRaw.budget === "object"
@@ -91,7 +114,7 @@ export default function TripClient({ id }) {
       participants,
       chat,
       media,
-      docs, // NEW
+      docs,
       budget,
       participantBudgets,
       partyType,
@@ -100,8 +123,52 @@ export default function TripClient({ id }) {
       submitted,
     };
     setTrip(initial);
-    saveTrip(id, initial); // normalize
+    saveTrip(id, initial);
   }, [id, mounted]);
+
+  // WEATHER: load from server route when we have coords + dates
+  useEffect(() => {
+    async function loadWeather() {
+      try {
+        setWxLoading(true);
+        setWxError("");
+        setWx(null);
+
+        if (!trip?.destinationCoords || !trip?.startDate || !trip?.endDate) {
+          setWxLoading(false);
+          return;
+        }
+        const body = {
+          lat: trip.destinationCoords.lat,
+          lng: trip.destinationCoords.lng,
+          startDate: trip.startDate,
+          endDate: trip.endDate,
+          // Choose units based on origin country heuristic if you want later; default C
+          unit: "auto", // server can decide best-effort; otherwise "c"|"f"
+        };
+        const res = await fetch("/api/weather", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        // expect: { ok:true, unit:"C"|"F", days:[{date, code, tMax, tMin, summary}] }
+        if (!data?.ok || !Array.isArray(data?.days)) {
+          setWxError("No forecast data");
+          setWxLoading(false);
+          return;
+        }
+        setWx({ unit: data.unit || "C", daily: data.days });
+      } catch (e) {
+        console.error("weather fail", e);
+        setWxError("Weather unavailable");
+      } finally {
+        setWxLoading(false);
+      }
+    }
+    loadWeather();
+  }, [trip?.destinationCoords, trip?.startDate, trip?.endDate]);
 
   if (!mounted || loading) return <div className="text-sm text-gray-500">Loading…</div>;
   if (!trip) {
@@ -119,6 +186,7 @@ export default function TripClient({ id }) {
   const mode = trip.transport || "flights";
   const vibe = trip.vibe || "adventure";
   const dateRange = fmtRange(trip.startDate, trip.endDate);
+  const dateList = datesBetween(trip.startDate, trip.endDate); // array of JS Dates (one per day)
 
   function guardOr(fn) {
     if (!canEdit) {
@@ -286,8 +354,17 @@ export default function TripClient({ id }) {
       const partyType = base.partyType || "solo";
       const budgetModel = partyType === "solo" ? "individual" : base.budgetModel || "individual";
 
-      const newNights = Number(base.nights ?? 4);
-      const newDays = Math.max(1, newNights + 1);
+      // derive nights/days from dates if provided
+      let nightsNum = trip.nights ?? 4;
+      if (base.startDate && base.endDate) {
+        const s = new Date(base.startDate);
+        const e = new Date(base.endDate);
+        if (!isNaN(s) && !isNaN(e) && e >= s) {
+          const diff = Math.round((e - s) / (1000 * 60 * 60 * 24));
+          nightsNum = Math.max(0, diff);
+        }
+      }
+      const newDays = Math.max(1, nightsNum + 1);
 
       let acts = Array.isArray(base.activities) ? base.activities : trip.activities || [];
       acts = acts.slice(0, newDays);
@@ -295,10 +372,10 @@ export default function TripClient({ id }) {
 
       const next = {
         ...base,
+        nights: nightsNum,
+        activities: acts,
         partyType,
         budgetModel,
-        nights: newNights,
-        activities: acts,
         submitted: true,
         updatedAt: Date.now(),
       };
@@ -306,7 +383,7 @@ export default function TripClient({ id }) {
     });
   }
 
-  // Docs (NEW)
+  // Docs
   function addDoc(doc) {
     guardOr(() => {
       const next = structuredClone(trip);
@@ -316,7 +393,6 @@ export default function TripClient({ id }) {
       persist(next);
     });
   }
-
   function removeDoc(docId) {
     guardOr(() => {
       const next = structuredClone(trip);
@@ -325,7 +401,6 @@ export default function TripClient({ id }) {
       persist(next);
     });
   }
-
   function updateDoc(docId, updated) {
     guardOr(() => {
       const next = structuredClone(trip);
@@ -333,6 +408,27 @@ export default function TripClient({ id }) {
       next.updatedAt = Date.now();
       persist(next);
     });
+  }
+
+  // helpers for weather icons/labels
+  function wxBadge(dayDate) {
+    if (!wx?.daily || !Array.isArray(wx.daily)) return null;
+    const yyyy = dayDate.getFullYear();
+    const mm = String(dayDate.getMonth() + 1).padStart(2, "0");
+    const dd = String(dayDate.getDate()).padStart(2, "0");
+    const key = `${yyyy}-${mm}-${dd}`;
+    const rec = wx.daily.find((d) => d.date === key);
+    if (!rec) return null;
+    const unit = wx.unit === "F" ? "°F" : "°C";
+    const icon = rec.icon || "🌡️";
+    const hi = rec.tMax != null ? Math.round(rec.tMax) : null;
+    const lo = rec.tMin != null ? Math.round(rec.tMin) : null;
+    const label =
+      hi != null && lo != null ? `${hi}${unit} / ${lo}${unit}` :
+      hi != null ? `${hi}${unit}` :
+      lo != null ? `${lo}${unit}` :
+      "";
+    return { icon, label, summary: rec.summary || "" };
   }
 
   return (
@@ -365,7 +461,7 @@ export default function TripClient({ id }) {
             </div>
           </section>
 
-          {/* Docs + Budget + Participants */}
+          {/* Docs + Budget */}
           <section className="grid gap-6 md:grid-cols-2">
             <TripDocsTile
               docs={trip.docs || []}
@@ -405,29 +501,36 @@ export default function TripClient({ id }) {
             />
           </section>
 
-          {/* Participants */}
-          <section className="grid gap-6 md:grid-cols-2">
-            <ParticipantsPanel
-              participants={trip.participants || []}
-              onAdd={addParticipant}
-              onRemove={removeParticipant}
-            />
-            <div className="hidden md:block" />
-          </section>
+          {/* Participants — hide when solo */}
+          {trip.partyType === "group" && (
+            <section className="grid gap-6 md:grid-cols-2">
+              <ParticipantsPanel
+                participants={trip.participants || []}
+                onAdd={addParticipant}
+                onRemove={removeParticipant}
+              />
+              <div className="hidden md:block" />
+            </section>
+          )}
 
           {/* Day tiles */}
           <section>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
               {Array.from({ length: days }).map((_, i) => (
-                <ItineraryDay
-                  key={i}
-                  dayNumber={i + 1}
-                  activities={trip.activities[i]}
-                  onAdd={(text) => addActivity(i, text)}
-                  onEdit={(idx, text) => editActivity(i, idx, text)}
-                  onRemove={(idx) => removeActivity(i, idx)}
-                  onMove={(fromIdx, toIdx) => moveActivity(i, fromIdx, toIdx)}
-                />
+                <div key={i} className="flex flex-col">
+                  <ItineraryDay
+                    dayNumber={i + 1}
+                    activities={trip.activities[i]}
+                    onAdd={(text) => addActivity(i, text)}
+                    onEdit={(idx, text) => editActivity(i, idx, text)}
+                    onRemove={(idx) => removeActivity(i, idx)}
+                    onMove={(fromIdx, toIdx) => moveActivity(i, fromIdx, toIdx)}
+                  />
+                  {/* Non-overlapping weather row under the tile */}
+                  {dateList[i] && (
+                    <WeatherRow dayDate={dateList[i]} wxBadge={wxBadge} wxLoading={wxLoading} wxError={wxError} />
+                  )}
+                </div>
               ))}
             </div>
           </section>
@@ -456,6 +559,26 @@ export default function TripClient({ id }) {
           {!canEdit && <div className="mt-2 text-red-500">Sign in to save your trip and make changes.</div>}
         </section>
       )}
+    </div>
+  );
+}
+
+// Small inline component for a clean weather display below each day tile
+function WeatherRow({ dayDate, wxBadge, wxLoading, wxError }) {
+  const badge = wxBadge(dayDate);
+  if (wxLoading && !badge) {
+    return <div className="mt-1 text-xs text-gray-400">Loading weather…</div>;
+  }
+  if (wxError && !badge) {
+    return <div className="mt-1 text-xs text-gray-400">{wxError}</div>;
+  }
+  if (!badge) return null;
+
+  return (
+    <div className="mt-1 flex items-center gap-2 text-xs text-gray-600">
+      <span aria-hidden>{badge.icon}</span>
+      <span className="truncate">{badge.label}</span>
+      {badge.summary && <span className="truncate text-gray-500">· {badge.summary}</span>}
     </div>
   );
 }
