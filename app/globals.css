@@ -110,6 +110,26 @@
   }
 }
 
+/* --- Non-intrusive full-page background image --- */
+html, body { height: 100%; }
+
+/* Ensure body background is transparent so the poster shows */
+body { background-color: transparent !important; }
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;                /* sits behind everything */
+  background-image: url("/media/hero-poster.jpg");
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  /* optional readability overlay; lower the alpha if too dark */
+  box-shadow: inset 0 0 0 100vmax rgba(0,0,0,0.25);
+  pointer-events: none;       /* never block clicks */
+}  /* <-- THIS was missing */
+
 /* ---------- Utility helpers (optional) ---------- */
 @layer utilities {
   .no-select {
