@@ -8,8 +8,7 @@ import { useEffect, useRef, useState } from "react";
  * - dayNumber: number (1-based)
  * - activities: string[]
  * - summary?: string
- * - weather?: { icon: string, temp: number, unit: "C"|"F", desc?: string } | null
- * - weatherLoading?: boolean
+ * - meta?: ReactNode     // NEW: shows top-right inside the tile (e.g., weather badge)
  * - onAdd(text: string)
  * - onEdit(index: number, text: string)
  * - onRemove(index: number)
@@ -19,8 +18,7 @@ export default function ItineraryDay({
   dayNumber,
   activities = [],
   summary,
-  weather = null,
-  weatherLoading = false,
+  meta, // NEW
   onAdd,
   onEdit,
   onRemove,
@@ -29,9 +27,11 @@ export default function ItineraryDay({
   const [open, setOpen] = useState(false);
   const [input, setInput] = useState("");
   const [editing, setEditing] = useState({ index: -1, value: "" });
-
   const modalRef = useRef(null);
-  useEffect(() => { if (open) modalRef.current?.focus(); }, [open]);
+
+  useEffect(() => {
+    if (open) modalRef.current?.focus();
+  }, [open]);
 
   const daySummary =
     (summary && summary.trim()) ||
@@ -43,36 +43,36 @@ export default function ItineraryDay({
 
   return (
     <>
-      {/* Tile */}
       <button
-        className="group relative aspect-square rounded-2xl border border-gray-200 bg-white p-4 text-left shadow-sm hover:shadow-md focus:outline-none focus:ring-2 focus:ring-slate-300"
+        className="group relative aspect-square rounded-2xl border border-gray-200 bg-white p-4 text-left shadow-sm transition hover:shadow-md focus:outline-none focus:ring-2 focus:ring-slate-300"
         onClick={() => setOpen(true)}
         onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && setOpen(true)}
         aria-haspopup="dialog"
         aria-label={`Open Day ${dayNumber}`}
       >
-        {/* Header row (title + weather badge) */}
-        <div className="mb-2 flex items-center justify-between">
-          <span className="inline-flex items-center gap-2 text-sm font-semibold">
-            Day {dayNumber}
-          </span>
+        {/* top-right meta (e.g., weather) */}
+        {meta ? (
+          <div className="pointer-events-none absolute right-3 top-3 z-10">
+            {meta}
+          </div>
+        ) : null}
 
-          <div className="flex items-center gap-2">
-            {/* Weather badge (never overlaps text) */}
-            <WeatherBadge weather={weather} loading={weatherLoading} />
-
+        <div className="flex h-full flex-col">
+          <div className="mb-2 flex items-center justify-between pr-10">
+            {/* pr-10 so long day titles don't collide with meta */}
+            <span className="inline-flex items-center gap-2 text-sm font-semibold">
+              Day {dayNumber}
+            </span>
             <span className="rounded-full border border-gray-200 px-2 py-0.5 text-xs text-gray-500">
               {activities.length} items
             </span>
           </div>
+          <p className="line-clamp-3 text-sm text-gray-600">{daySummary}</p>
+
+          <span className="pointer-events-none absolute bottom-3 right-3 text-xs text-gray-400 opacity-0 transition group-hover:opacity-100">
+            Click to expand
+          </span>
         </div>
-
-        {/* Summary text (has room because weather is in the header row) */}
-        <p className="line-clamp-4 text-sm text-gray-700">{daySummary}</p>
-
-        <span className="pointer-events-none absolute bottom-3 right-3 text-xs text-gray-400 opacity-0 transition group-hover:opacity-100">
-          Click to expand
-        </span>
       </button>
 
       {/* Modal editor */}
@@ -94,18 +94,22 @@ export default function ItineraryDay({
               if (e.key === "Escape") setOpen(false);
             }}
           >
-            {/* Modal header */}
+            {/* header */}
             <div className="mb-3 flex items-center justify-between">
               <div>
                 <h3 className="text-lg font-semibold">Day {dayNumber}</h3>
                 <p className="text-sm text-gray-600">{daySummary}</p>
               </div>
-
-              {/* Weather moved to a clean pill in the header */}
-              <WeatherBadge weather={weather} loading={weatherLoading} large />
+              <button
+                className="btn btn-outline"
+                onClick={() => setOpen(false)}
+                aria-label="Close"
+              >
+                Close
+              </button>
             </div>
 
-            {/* Activities list */}
+            {/* list */}
             <ul className="space-y-2">
               {activities.map((a, idx) => (
                 <li key={idx} className="flex items-center gap-2">
@@ -118,7 +122,9 @@ export default function ItineraryDay({
                       <input
                         className="input flex-1"
                         value={editing.value}
-                        onChange={(e) => setEditing((s) => ({ ...s, value: e.target.value }))}
+                        onChange={(e) =>
+                          setEditing((s) => ({ ...s, value: e.target.value }))
+                        }
                         onKeyDown={(e) => {
                           if (e.key === "Enter") commitEdit();
                           if (e.key === "Escape") cancelEdit();
@@ -163,10 +169,16 @@ export default function ItineraryDay({
                         </button>
                       </div>
 
-                      <button className="btn btn-outline" onClick={() => startEdit(idx)}>
+                      <button
+                        className="btn btn-outline"
+                        onClick={() => startEdit(idx)}
+                      >
                         Edit
                       </button>
-                      <button className="btn btn-outline" onClick={() => onRemove?.(idx)}>
+                      <button
+                        className="btn btn-outline"
+                        onClick={() => onRemove?.(idx)}
+                      >
                         Remove
                       </button>
                     </>
@@ -175,7 +187,7 @@ export default function ItineraryDay({
               ))}
             </ul>
 
-            {/* Add new activity */}
+            {/* add */}
             <div className="mt-3 flex items-center gap-2">
               <input
                 className="input flex-1"
@@ -188,31 +200,18 @@ export default function ItineraryDay({
                 Add
               </button>
             </div>
-
-            {/* Modal footer */}
-            <div className="mt-3 flex justify-end">
-              <button
-                className="rounded-lg border border-gray-300 px-3 py-1 text-sm hover:bg-gray-50"
-                onClick={() => setOpen(false)}
-                aria-label="Close"
-              >
-                Close
-              </button>
-            </div>
           </div>
         </div>
       )}
     </>
   );
 
-  // ----- helpers -----
   function handleAdd() {
     const t = input.trim();
     if (!t) return;
     onAdd?.(t);
     setInput("");
   }
-
   function startEdit(idx) {
     setEditing({ index: idx, value: activities[idx] ?? "" });
   }
@@ -238,54 +237,4 @@ export default function ItineraryDay({
     const to = idx + (up ? -1 : 1);
     onMove(idx, to);
   }
-}
-
-/** Small, non-overlapping weather badge */
-function WeatherBadge({ weather, loading, large = false }) {
-  if (loading) {
-    return (
-      <span
-        className={`inline-flex items-center gap-1 rounded-full border border-gray-200 bg-gray-50 ${
-          large ? "px-3 py-1.5 text-sm" : "px-2 py-0.5 text-xs"
-        } text-gray-500`}
-        title="Loading weather…"
-      >
-        <svg
-          className={large ? "h-4 w-4 animate-spin" : "h-3 w-3 animate-spin"}
-          viewBox="0 0 24 24"
-          fill="none"
-        >
-          <circle cx="12" cy="12" r="10" stroke="currentColor" strokeOpacity="0.25" strokeWidth="4" />
-          <path
-            d="M22 12a10 10 0 0 1-10 10"
-            stroke="currentColor"
-            strokeWidth="4"
-            strokeLinecap="round"
-          />
-        </svg>
-        Loading
-      </span>
-    );
-  }
-
-  if (!weather) return null;
-
-  return (
-    <span
-      className={`inline-flex items-center gap-1 rounded-full border border-gray-200 bg-gray-50 ${
-        large ? "px-3 py-1.5 text-sm" : "px-2 py-0.5 text-xs"
-      } text-gray-700`}
-      title={weather.desc || "Forecast"}
-    >
-      {/* icon */}
-      <span aria-hidden className={large ? "text-base" : "text-sm"}>
-        {weather.icon || "☀️"}
-      </span>
-      {/* temp */}
-      <span className="font-medium">
-        {typeof weather.temp === "number" ? Math.round(weather.temp) : "—"}°
-        {weather.unit || "C"}
-      </span>
-    </span>
-  );
 }
