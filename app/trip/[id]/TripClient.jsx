@@ -11,12 +11,16 @@ import TripMetaEditor from "../../components/TripMetaEditor";
 import ExportPDFButton from "../../components/ExportPDFButton";
 import TripMediaGallery from "../../components/TripMediaGallery";
 import TripDocsTile from "../../components/TripDocsTile";
-import ExpenseTracker from "../../components/ExpenseTracker"; // NEW
+import ExpenseTracker from "../../components/ExpenseTracker";
 import { putMediaBlob } from "../../lib/mediaStore";
 import { useAuth } from "../../context/AuthProvider";
 
+// 🔴 Firestore helpers
+import { writeTripMeta, setItineraryTemplate } from "../../lib/trips";
+
 const MAX_MEDIA_BYTES = 250 * 1024 * 1024;
 
+/* --------------------- helpers --------------------- */
 function seedActivities(nights) {
   const days = Math.max(1, Number(nights ?? 1) + 1);
   return Array.from({ length: days }, (_, i) => {
@@ -25,7 +29,6 @@ function seedActivities(nights) {
     return ["Morning activity", "Explore", "Group dinner"];
   });
 }
-
 function fmtRange(startISO, endISO) {
   if (!startISO || !endISO) return "";
   const s = new Date(startISO);
@@ -35,6 +38,41 @@ function fmtRange(startISO, endISO) {
   return `${s.toLocaleDateString(undefined, opts)} → ${e.toLocaleDateString(undefined, opts)}`;
 }
 
+// week helpers for long trips
+function makeWeekRanges(totalDays) {
+  const weeks = Math.ceil(totalDays / 7);
+  const ranges = [];
+  for (let w = 0; w < weeks; w++) {
+    const start = w * 7;
+    const end = Math.min(totalDays, (w + 1) * 7);
+    ranges.push([start, end]);
+  }
+  return ranges;
+}
+function WeekGroup({ label, children, defaultOpen = false }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="rounded-xl border border-gray-200">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center justify-between px-3 py-2"
+        aria-expanded={open}
+      >
+        <span className="font-semibold">{label}</span>
+        <span
+          className={`inline-block transform transition-transform ${open ? "rotate-90" : ""}`}
+          aria-hidden
+        >
+          ▶
+        </span>
+      </button>
+      {open && <div className="p-3 pt-0">{children}</div>}
+    </div>
+  );
+}
+
+/* --------------------- component --------------------- */
 export default function TripClient({ id }) {
   const { user, loading } = useAuth();
   const [mounted, setMounted] = useState(false);
@@ -47,7 +85,7 @@ export default function TripClient({ id }) {
 
   useEffect(() => setMounted(true), []);
 
-  // Load & normalize trip from local storage (MVP)
+  // Load & normalize trip from local storage (kept as local seed/cache)
   useEffect(() => {
     if (!mounted) return;
     const byId = loadTrip(id);
@@ -73,7 +111,7 @@ export default function TripClient({ id }) {
     const media = Array.isArray(initialRaw.media) ? initialRaw.media : [];
     const docs = Array.isArray(initialRaw.docs) ? initialRaw.docs : [];
 
-    // Budget schema for ExpenseTracker: { currency, estimated }
+    // Budget schema used by ExpenseTracker
     const budget =
       initialRaw.budget && typeof initialRaw.budget === "object"
         ? { currency: initialRaw.budget.currency || "USD", estimated: initialRaw.budget.estimated ?? null }
@@ -82,7 +120,7 @@ export default function TripClient({ id }) {
     const expenses = Array.isArray(initialRaw.expenses) ? initialRaw.expenses : [];
 
     const partyType = initialRaw.partyType || "solo";
-    const budgetModel = initialRaw.budgetModel || "individual"; // retained for display
+    const budgetModel = initialRaw.budgetModel || "individual";
     const ownerId = initialRaw.ownerId || currentUserId;
     const submitted = Boolean(initialRaw.submitted);
 
@@ -105,11 +143,11 @@ export default function TripClient({ id }) {
       ownerId,
       submitted,
       changeLog,
-      originCountry,          // NEW
+      originCountry,
       lastUserId: initialRaw.lastUserId || currentUserId,
     };
 
-    // Reset change log if opened by a different user (until we move to Firestore)
+    // Reset local change log if opened by a different user
     if (initial.lastUserId !== currentUserId) {
       initial.changeLog = [];
       initial.lastUserId = currentUserId;
@@ -137,7 +175,7 @@ export default function TripClient({ id }) {
   const vibe = trip.vibe || "adventure";
   const dateRange = fmtRange(trip.startDate, trip.endDate);
 
-  // ---------- utility ----------
+  /* ---------- utils ---------- */
   function guardOr(fn) {
     if (!canEdit) {
       alert("Please sign in to make changes.");
@@ -145,7 +183,6 @@ export default function TripClient({ id }) {
     }
     fn();
   }
-
   function persist(next, logText) {
     if (!canEdit) {
       alert("Please sign in to make changes.");
@@ -168,7 +205,7 @@ export default function TripClient({ id }) {
     setTrip(next);
   }
 
-  // ---------- activities ----------
+  /* ---------- activities ---------- */
   function addActivity(dayIndex, text) {
     guardOr(() => {
       if (!text?.trim()) return;
@@ -203,7 +240,7 @@ export default function TripClient({ id }) {
     });
   }
 
-  // ---------- participants ----------
+  /* ---------- participants (local-only for now) ---------- */
   function addParticipant(email) {
     guardOr(() => {
       const t = (email || "").trim();
@@ -221,7 +258,7 @@ export default function TripClient({ id }) {
     });
   }
 
-  // ---------- media ----------
+  /* ---------- media ---------- */
   function currentMediaBytes() {
     return (trip.media || []).reduce((sum, m) => sum + (m.size || 0), 0);
   }
@@ -265,7 +302,7 @@ export default function TripClient({ id }) {
     return metas.map((m) => m.id);
   }
 
-  // ---------- chat ----------
+  /* ---------- chat ---------- */
   function appendChat(text, mediaIds = [], from = currentUserId) {
     guardOr(() => {
       const next = structuredClone(trip);
@@ -295,9 +332,9 @@ export default function TripClient({ id }) {
     }
   }
 
-  // ---------- trip meta submit (derive nights from dates) ----------
-  function handleSubmit(updates) {
-    guardOr(() => {
+  /* ---------- submit trip meta (and write to Firestore) ---------- */
+  async function handleSubmit(updates) {
+    guardOr(async () => {
       const base = { ...trip, ...(updates || {}) };
       const partyType = base.partyType || "solo";
       const budgetModel = partyType === "solo" ? "individual" : base.budgetModel || "individual";
@@ -325,17 +362,44 @@ export default function TripClient({ id }) {
         budgetModel,
         submitted: true,
       };
+
+      // Persist locally (legacy cache / offline)…
       persist(next, "Updated trip details");
+
+      // …and write editable meta to Firestore
+      try {
+        await writeTripMeta(next.id, {
+          title: next.title || null,
+          origin: next.origin || null,
+          destination: next.destination || null,
+          startDate: next.startDate || null,
+          endDate: next.endDate || null,
+          transport: next.transport || null,
+          vibe: next.vibe || null,
+          partyType: next.partyType || null,
+          budgetModel: next.budgetModel || null,
+          submitted: true,
+        }, user?.uid);
+
+        // If I'm the owner, also persist the itinerary template
+        const isOwner = user?.uid && (next?.ownerUid === user.uid || next?.ownerId === user.uid);
+        if (isOwner) {
+          await setItineraryTemplate(next.id, user.uid, next.activities);
+        }
+      } catch (e) {
+        console.error("Failed writing trip meta/template:", e);
+        // keep UI usable even if this fails
+      }
     });
   }
 
-  // ---------- docs ----------
-  function addDoc(doc) {
+  /* ---------- docs ---------- */
+  function addDoc(docItem) {
     guardOr(() => {
       const next = structuredClone(trip);
       next.docs = Array.isArray(next.docs) ? next.docs : [];
-      next.docs.unshift(doc);
-      persist(next, `Added doc: ${doc.title || "Untitled"}`);
+      next.docs.unshift(docItem);
+      persist(next, `Added doc: ${docItem.title || "Untitled"}`);
     });
   }
   function removeDoc(docId) {
@@ -353,7 +417,7 @@ export default function TripClient({ id }) {
     });
   }
 
-  // ---------- budget & expenses (NEW) ----------
+  /* ---------- budget & expenses ---------- */
   function setEstimatedBudget(n) {
     guardOr(() => {
       const next = structuredClone(trip);
@@ -361,7 +425,6 @@ export default function TripClient({ id }) {
       persist(next, "Updated estimated budget");
     });
   }
-
   function setBudgetCurrency(code) {
     guardOr(() => {
       const next = structuredClone(trip);
@@ -369,7 +432,6 @@ export default function TripClient({ id }) {
       persist(next, `Changed currency to ${code || "USD"}`);
     });
   }
-
   function setOriginCountry(country) {
     guardOr(() => {
       const next = structuredClone(trip);
@@ -377,7 +439,6 @@ export default function TripClient({ id }) {
       persist(next, `Set origin country: ${country || "—"}`);
     });
   }
-
   function addExpense(expDraft) {
     guardOr(() => {
       const next = structuredClone(trip);
@@ -389,7 +450,6 @@ export default function TripClient({ id }) {
       persist(next, `Added expense: ${expDraft.desc}`);
     });
   }
-
   function removeExpense(id) {
     guardOr(() => {
       const next = structuredClone(trip);
@@ -398,6 +458,7 @@ export default function TripClient({ id }) {
     });
   }
 
+  /* --------------------- UI --------------------- */
   return (
     <div className="mx-auto max-w-5xl space-y-6 p-4">
       <TripMetaEditor trip={trip} onSubmit={handleSubmit} />
@@ -405,20 +466,20 @@ export default function TripClient({ id }) {
       {trip.submitted ? (
         <>
           <section className="card">
-           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <h2 className="text-xl font-bold">
-             {(destination || "Destination")} — {days} day{days > 1 ? "s" : ""} / {nights} night{nights > 1 ? "s" : ""}
-            </h2>
-            {dateRange && <div className="text-sm text-gray-600">{dateRange}</div>}
-           </div>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <h2 className="text-xl font-bold">
+                {(destination || "Destination")} — {days} day{days > 1 ? "s" : ""} / {nights} night{nights > 1 ? "s" : ""}
+              </h2>
+              {dateRange && <div className="text-sm text-gray-600">{dateRange}</div>}
+            </div>
 
-           <div className="mt-3 flex flex-wrap gap-2">
-            <span className="badge">Party: {trip?.partyType || "solo"}</span>
-            <span className="badge">Budget: {trip?.budgetModel || "individual"}</span>
-            <span className="badge">Mode: {mode}</span>
-            <span className="badge">Vibe: {vibe}</span>
-            {!canEdit && <span className="badge border-red-200 bg-red-50 text-red-700">Read-only</span>}
-           </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <span className="badge">Party: {trip?.partyType || "solo"}</span>
+              <span className="badge">Budget: {trip?.budgetModel || "individual"}</span>
+              <span className="badge">Mode: {mode}</span>
+              <span className="badge">Vibe: {vibe}</span>
+              {!canEdit && <span className="badge border-red-200 bg-red-50 text-red-700">Read-only</span>}
+            </div>
           </section>
 
           {/* Media + Transport */}
@@ -455,10 +516,10 @@ export default function TripClient({ id }) {
               participants={trip.participants || []}
               currentUserId={currentUserId}
               ownerId={trip.ownerId}
-              originCountry={trip.originCountry || null}   // NEW
+              originCountry={trip.originCountry || null}
               onSetEstimatedBudget={setEstimatedBudget}
-              onSetCurrency={setBudgetCurrency}            // NEW
-              onSetOriginCountry={setOriginCountry}        // NEW
+              onSetCurrency={setBudgetCurrency}
+              onSetOriginCountry={setOriginCountry}
               onAddExpense={addExpense}
               onRemoveExpense={removeExpense}
             />
@@ -476,21 +537,46 @@ export default function TripClient({ id }) {
             </section>
           )}
 
-          {/* Day tiles */}
+          {/* Day tiles with weekly grouping */}
           <section>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
-              {Array.from({ length: days }).map((_, i) => (
-                <ItineraryDay
-                  key={i}
-                  dayNumber={i + 1}
-                  activities={trip.activities[i]}
-                  onAdd={(text) => addActivity(i, text)}
-                  onEdit={(idx, text) => editActivity(i, idx, text)}
-                  onRemove={(idx) => removeActivity(i, idx)}
-                  onMove={(fromIdx, toIdx) => moveActivity(i, fromIdx, toIdx)}
-                />
-              ))}
-            </div>
+            {days <= 9 ? (
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
+                {Array.from({ length: days }).map((_, i) => (
+                  <ItineraryDay
+                    key={i}
+                    dayNumber={i + 1}
+                    activities={trip.activities[i]}
+                    onAdd={(text) => addActivity(i, text)}
+                    onEdit={(idx, text) => editActivity(i, idx, text)}
+                    onRemove={(idx) => removeActivity(i, idx)}
+                    onMove={(fromIdx, toIdx) => moveActivity(i, fromIdx, toIdx)}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {makeWeekRanges(days).map(([start, end], wIdx) => (
+                  <WeekGroup key={wIdx} label={`Week ${wIdx + 1}`} defaultOpen={wIdx === 0}>
+                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
+                      {Array.from({ length: end - start }).map((_, i) => {
+                        const dayIdx = start + i;
+                        return (
+                          <ItineraryDay
+                            key={dayIdx}
+                            dayNumber={dayIdx + 1}
+                            activities={trip.activities[dayIdx]}
+                            onAdd={(text) => addActivity(dayIdx, text)}
+                            onEdit={(idx, text) => editActivity(dayIdx, idx, text)}
+                            onRemove={(idx) => removeActivity(dayIdx, idx)}
+                            onMove={(fromIdx, toIdx) => moveActivity(dayIdx, fromIdx, toIdx)}
+                          />
+                        );
+                      })}
+                    </div>
+                  </WeekGroup>
+                ))}
+              </div>
+            )}
           </section>
 
           {/* Change log */}
