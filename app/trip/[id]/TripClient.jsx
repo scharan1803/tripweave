@@ -1,7 +1,7 @@
 // app/trip/[id]/TripClient.jsx
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { loadTrip, loadDraft, saveTrip } from "../../lib/storage";
 import TransportLinks from "../../components/TransportLinks";
 import ParticipantsPanel from "../../components/ParticipantsPanel";
@@ -15,12 +15,17 @@ import ExpenseTracker from "../../components/ExpenseTracker";
 import { putMediaBlob } from "../../lib/mediaStore";
 import { useAuth } from "../../context/AuthProvider";
 
-// 🔴 Firestore helpers
-import { writeTripMeta, setItineraryTemplate } from "../../lib/trips";
+// Firestore helpers
+import {
+  writeTripMeta,
+  setItineraryTemplate,
+  saveMyItinerary,
+  getTripMeta,
+} from "../../lib/trips";
 
 const MAX_MEDIA_BYTES = 250 * 1024 * 1024;
 
-/* --------------------- helpers --------------------- */
+// ---------- helpers ----------
 function seedActivities(nights) {
   const days = Math.max(1, Number(nights ?? 1) + 1);
   return Array.from({ length: days }, (_, i) => {
@@ -37,145 +42,158 @@ function fmtRange(startISO, endISO) {
   const opts = { year: "numeric", month: "short", day: "numeric" };
   return `${s.toLocaleDateString(undefined, opts)} → ${e.toLocaleDateString(undefined, opts)}`;
 }
-
-// week helpers for long trips
-function makeWeekRanges(totalDays) {
-  const weeks = Math.ceil(totalDays / 7);
-  const ranges = [];
-  for (let w = 0; w < weeks; w++) {
-    const start = w * 7;
-    const end = Math.min(totalDays, (w + 1) * 7);
-    ranges.push([start, end]);
-  }
-  return ranges;
+function calcNights(sISO, eISO) {
+  if (!sISO || !eISO) return 4;
+  const s = new Date(sISO);
+  const e = new Date(eISO);
+  if (isNaN(s) || isNaN(e) || e < s) return 4;
+  const diff = Math.round((e - s) / (1000 * 60 * 60 * 24));
+  return Math.max(0, diff);
 }
-function WeekGroup({ label, children, defaultOpen = false }) {
-  const [open, setOpen] = useState(defaultOpen);
-  return (
-    <div className="rounded-xl border border-gray-200">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center justify-between px-3 py-2"
-        aria-expanded={open}
-      >
-        <span className="font-semibold">{label}</span>
-        <span
-          className={`inline-block transform transition-transform ${open ? "rotate-90" : ""}`}
-          aria-hidden
-        >
-          ▶
-        </span>
-      </button>
-      {open && <div className="p-3 pt-0">{children}</div>}
-    </div>
-  );
+function countDaysInclusive(sISO, eISO, fallback) {
+  if (!sISO || !eISO) return Math.max(1, fallback || 1);
+  const s = new Date(sISO);
+  const e = new Date(eISO);
+  if (isNaN(s) || isNaN(e) || e < s) return Math.max(1, fallback || 1);
+  const diff = Math.round((e - s) / (1000 * 60 * 60 * 24));
+  return Math.max(1, diff + 1); // days = nights + 1
 }
 
-/* --------------------- component --------------------- */
 export default function TripClient({ id }) {
   const { user, loading } = useAuth();
   const [mounted, setMounted] = useState(false);
   const [trip, setTrip] = useState(null);
+  const [savingItin, setSavingItin] = useState(false);
+  const [saveStatus, setSaveStatus] = useState("");
 
   const prevUserRef = useRef(null);
 
-  const canEdit = !!user;
+  const canEdit = !!user; // ✅ declared once here
   const currentUserId = user?.email || user?.uid || "anon@local";
 
   useEffect(() => setMounted(true), []);
 
-  // Load & normalize trip from local storage (kept as local seed/cache)
+  // INITIAL LOAD: localStorage → Firestore fallback
   useEffect(() => {
     if (!mounted) return;
-    const byId = loadTrip(id);
-    const draft = loadDraft();
-    const initialRaw = byId || draft || null;
-    if (!initialRaw) {
-      setTrip(null);
-      return;
-    }
 
-    const nights = Number(initialRaw.nights ?? 4);
-    const activities = Array.isArray(initialRaw.activities)
-      ? initialRaw.activities
-      : seedActivities(nights);
+    (async () => {
+      // 1) Try localStorage
+      const byId = loadTrip(id);
+      const draft = loadDraft();
+      let initialRaw = byId || draft || null;
 
-    const days = Math.max(1, nights + 1);
-    let normalizedActs = activities.slice(0, days);
-    while (normalizedActs.length < days)
-      normalizedActs.push(["Morning activity", "Explore", "Group dinner"]);
+      // 2) If not found locally, try Firestore
+      if (!initialRaw) {
+        try {
+          const meta = await getTripMeta(id);
+          if (meta) {
+            const nights = calcNights(meta.startDate, meta.endDate);
+            const activities = seedActivities(nights);
+            initialRaw = {
+              id,
+              title: meta.title || "Untitled Trip",
+              ownerUid: meta.ownerUid || null,
+              origin: meta.origin || "",
+              destination: meta.destination || "",
+              startDate: meta.startDate || null,
+              endDate: meta.endDate || null,
+              transport: meta.transport || "flights",
+              vibe: meta.vibe || "adventure",
+              partyType: meta.partyType || "solo",
+              budgetModel: meta.budgetModel || "individual",
+              activities,
+              nights,
+              participants: [],
+              chat: [],
+              media: [],
+              docs: [],
+              submitted: Boolean(meta.submitted),
+              changeLog: [],
+              originCountry: null,
+              lastUserId: currentUserId,
+            };
+            saveTrip(id, initialRaw);
+          }
+        } catch (e) {
+          console.warn("TripClient: Firestore fetch failed (read rules or not owner?):", e);
+        }
+      }
 
-    const participants = Array.isArray(initialRaw.participants) ? initialRaw.participants : [];
-    const chat = Array.isArray(initialRaw.chat) ? initialRaw.chat : [];
-    const media = Array.isArray(initialRaw.media) ? initialRaw.media : [];
-    const docs = Array.isArray(initialRaw.docs) ? initialRaw.docs : [];
+      if (!initialRaw) {
+        setTrip(null);
+        return;
+      }
 
-    // Budget schema used by ExpenseTracker
-    const budget =
-      initialRaw.budget && typeof initialRaw.budget === "object"
-        ? { currency: initialRaw.budget.currency || "USD", estimated: initialRaw.budget.estimated ?? null }
-        : { currency: "USD", estimated: null };
+      // Normalize activities to days
+      const nights = Number(initialRaw.nights ?? calcNights(initialRaw.startDate, initialRaw.endDate));
+      const days = Math.max(1, nights + 1);
+      const baseActs = Array.isArray(initialRaw.activities)
+        ? initialRaw.activities
+        : seedActivities(nights);
+      let normalizedActs = baseActs.slice(0, days);
+      while (normalizedActs.length < days)
+        normalizedActs.push(["Morning activity", "Explore", "Group dinner"]);
 
-    const expenses = Array.isArray(initialRaw.expenses) ? initialRaw.expenses : [];
+      // Budget & other arrays
+      const participants = Array.isArray(initialRaw.participants) ? initialRaw.participants : [];
+      const chat = Array.isArray(initialRaw.chat) ? initialRaw.chat : [];
+      const media = Array.isArray(initialRaw.media) ? initialRaw.media : [];
+      const docs = Array.isArray(initialRaw.docs) ? initialRaw.docs : [];
+      const budget =
+        initialRaw.budget && typeof initialRaw.budget === "object"
+          ? { currency: initialRaw.budget.currency || "USD", estimated: initialRaw.budget.estimated ?? null }
+          : { currency: "USD", estimated: null };
+      const expenses = Array.isArray(initialRaw.expenses) ? initialRaw.expenses : [];
 
-    const partyType = initialRaw.partyType || "solo";
-    const budgetModel = initialRaw.budgetModel || "individual";
-    const ownerId = initialRaw.ownerId || currentUserId;
-    const submitted = Boolean(initialRaw.submitted);
+      const initial = {
+        id,
+        ...initialRaw,
+        nights,
+        activities: normalizedActs,
+        participants,
+        chat,
+        media,
+        docs,
+        budget,
+        expenses,
+        partyType: initialRaw.partyType || "solo",
+        budgetModel: initialRaw.budgetModel || "individual",
+        ownerId: initialRaw.ownerId || currentUserId,
+        submitted: Boolean(initialRaw.submitted),
+        changeLog: Array.isArray(initialRaw.changeLog) ? initialRaw.changeLog : [],
+        originCountry: initialRaw.originCountry || null,
+        lastUserId: initialRaw.lastUserId || currentUserId,
+      };
 
-    const changeLog = Array.isArray(initialRaw.changeLog) ? initialRaw.changeLog : [];
-    const originCountry = initialRaw.originCountry || null;
+      // Reset change log if opened by a different user (until real multiuser sync)
+      if (initial.lastUserId !== currentUserId) {
+        initial.changeLog = [];
+        initial.lastUserId = currentUserId;
+      }
 
-    const initial = {
-      id,
-      ...initialRaw,
-      nights,
-      activities: normalizedActs,
-      participants,
-      chat,
-      media,
-      docs,
-      budget,
-      expenses,
-      partyType,
-      budgetModel,
-      ownerId,
-      submitted,
-      changeLog,
-      originCountry,
-      lastUserId: initialRaw.lastUserId || currentUserId,
-    };
+      setTrip(initial);
+      saveTrip(id, initial);
+      prevUserRef.current = currentUserId;
+    })();
+  }, [id, mounted, currentUserId]);
 
-    // Reset local change log if opened by a different user
-    if (initial.lastUserId !== currentUserId) {
-      initial.changeLog = [];
-      initial.lastUserId = currentUserId;
-    }
-
-    setTrip(initial);
-    saveTrip(id, initial);
-    prevUserRef.current = currentUserId;
-  }, [id, mounted]);
-
-  if (!mounted || loading) return <div className="text-sm text-gray-500">Loading…</div>;
-  if (!trip) {
-    return (
-      <div className="mx-auto max-w-5xl rounded-2xl border border-gray-100 bg-white p-6 text-gray-700">
-        No trip found for <span className="font-mono">{id}</span>.
-      </div>
-    );
-  }
-
-  const origin = trip.origin || "";
-  const destination = trip.destination || "";
-  const nights = Number(trip.nights ?? 4);
+  const origin = trip?.origin || "";
+  const destination = trip?.destination || "";
+  const nights = Number(trip?.nights ?? 4);
   const days = Math.max(1, nights + 1);
-  const mode = trip.transport || "flights";
-  const vibe = trip.vibe || "adventure";
-  const dateRange = fmtRange(trip.startDate, trip.endDate);
+  const mode = trip?.transport || "flights";
+  const vibe = trip?.vibe || "adventure";
+  const dateRange = fmtRange(trip?.startDate, trip?.endDate);
 
-  /* ---------- utils ---------- */
+  // --- derived helpers ---
+  const canSaveItinerary = useMemo(() => {
+    if (!user || !trip || !trip.id) return false;
+    const acts = Array.isArray(trip.activities) ? trip.activities : [];
+    return acts.length > 0;
+  }, [user, trip]);
+
+  // ---------- utility ----------
   function guardOr(fn) {
     if (!canEdit) {
       alert("Please sign in to make changes.");
@@ -205,7 +223,28 @@ export default function TripClient({ id }) {
     setTrip(next);
   }
 
-  /* ---------- activities ---------- */
+  // ---------- SAVE ITINERARY to Firestore ----------
+  async function handleSaveItinerary() {
+    if (!user || !trip?.id) return;
+    setSavingItin(true);
+    setSaveStatus("");
+    try {
+      const wanted = countDaysInclusive(trip.startDate, trip.endDate, trip.activities?.length || 1);
+      const padded = Array.from({ length: wanted }, (_, i) =>
+        (Array.isArray(trip.activities?.[i]) ? trip.activities[i] : []).map((s) => String(s ?? ""))
+      );
+      await saveMyItinerary(trip.id, user.uid, padded);
+      setSaveStatus("ok");
+    } catch (e) {
+      console.error("Save itinerary failed:", e);
+      setSaveStatus("err");
+    } finally {
+      setSavingItin(false);
+      setTimeout(() => setSaveStatus(""), 2500);
+    }
+  }
+
+  // ---------- activities ----------
   function addActivity(dayIndex, text) {
     guardOr(() => {
       if (!text?.trim()) return;
@@ -240,7 +279,7 @@ export default function TripClient({ id }) {
     });
   }
 
-  /* ---------- participants (local-only for now) ---------- */
+  // ---------- participants ----------
   function addParticipant(email) {
     guardOr(() => {
       const t = (email || "").trim();
@@ -258,7 +297,7 @@ export default function TripClient({ id }) {
     });
   }
 
-  /* ---------- media ---------- */
+  // ---------- media ----------
   function currentMediaBytes() {
     return (trip.media || []).reduce((sum, m) => sum + (m.size || 0), 0);
   }
@@ -287,13 +326,7 @@ export default function TripClient({ id }) {
     for (const f of list) {
       const mediaId = (crypto?.randomUUID && crypto.randomUUID()) || `${Date.now()}-${Math.random()}`;
       await putMediaBlob(mediaId, f);
-      metas.push({
-        id: mediaId,
-        name: f.name,
-        type: f.type,
-        size: f.size,
-        createdAt: Date.now(),
-      });
+      metas.push({ id: mediaId, name: f.name, type: f.type, size: f.size, createdAt: Date.now() });
     }
 
     const next = structuredClone(trip);
@@ -302,37 +335,31 @@ export default function TripClient({ id }) {
     return metas.map((m) => m.id);
   }
 
-  /* ---------- chat ---------- */
-  function appendChat(text, mediaIds = [], from = currentUserId) {
+  // ---------- docs ----------
+  function addDoc(docObj) {
     guardOr(() => {
       const next = structuredClone(trip);
-      (next.chat ||= []).push({
-        id: (crypto?.randomUUID && crypto.randomUUID()) || String(Date.now()),
-        from,
-        text: text || "",
-        mediaIds,
-        at: Date.now(),
-      });
-      persist(next, `New chat message from ${from}`);
+      next.docs = Array.isArray(next.docs) ? next.docs : [];
+      next.docs.unshift(docObj);
+      persist(next, `Added doc: ${docObj?.title || "Untitled"}`);
     });
   }
-  async function handleChatSend(text, files) {
-    if (!canEdit) {
-      alert("Please sign in to send messages.");
-      return;
-    }
-    let mediaIds = [];
-    if (files && files.length > 0) {
-      mediaIds = await addTripMedia(files);
-    }
-    if ((text && text.trim()) || (mediaIds && mediaIds.length > 0)) {
-      appendChat(text.trim(), mediaIds);
-    } else if (files?.length) {
-      throw new Error("Media not sent — trip has reached the 250 MB limit.");
-    }
+  function removeDoc(docId) {
+    guardOr(() => {
+      const next = structuredClone(trip);
+      next.docs = (next.docs || []).filter((d) => d.id !== docId);
+      persist(next, "Removed a doc");
+    });
+  }
+  function updateDoc(docId, updated) {
+    guardOr(() => {
+      const next = structuredClone(trip);
+      next.docs = (next.docs || []).map((d) => (d.id === docId ? { ...d, ...updated, updatedAt: Date.now() } : d));
+      persist(next, "Updated a doc");
+    });
   }
 
-  /* ---------- submit trip meta (and write to Firestore) ---------- */
+  // ---------- trip meta submit ----------
   async function handleSubmit(updates) {
     guardOr(async () => {
       const base = { ...trip, ...(updates || {}) };
@@ -363,104 +390,76 @@ export default function TripClient({ id }) {
         submitted: true,
       };
 
-      // Persist locally (legacy cache / offline)…
+      // Persist locally
       persist(next, "Updated trip details");
 
-      // …and write editable meta to Firestore
+      // Firestore: editable trip meta
       try {
-        await writeTripMeta(next.id, {
-          title: next.title || null,
-          origin: next.origin || null,
-          destination: next.destination || null,
-          startDate: next.startDate || null,
-          endDate: next.endDate || null,
-          transport: next.transport || null,
-          vibe: next.vibe || null,
-          partyType: next.partyType || null,
-          budgetModel: next.budgetModel || null,
-          submitted: true,
-        }, user?.uid);
+        await writeTripMeta(
+          next.id,
+          {
+            title: next.title ?? null,
+            origin: next.origin ?? null,
+            destination: next.destination ?? null,
+            startDate: next.startDate ?? null,
+            endDate: next.endDate ?? null,
+            transport: next.transport ?? null,
+            vibe: next.vibe ?? null,
+            partyType: next.partyType ?? null,
+            budgetModel: next.budgetModel ?? null,
+            submitted: next.submitted ?? false,
+          },
+          user?.uid
+        );
 
-        // If I'm the owner, also persist the itinerary template
+        // If I'm the owner, also update the shared itinerary template (optional)
         const isOwner = user?.uid && (next?.ownerUid === user.uid || next?.ownerId === user.uid);
         if (isOwner) {
           await setItineraryTemplate(next.id, user.uid, next.activities);
         }
-      } catch (e) {
-        console.error("Failed writing trip meta/template:", e);
-        // keep UI usable even if this fails
+      } catch (err) {
+        console.error("Failed writing trip meta/template:", err);
       }
     });
   }
 
-  /* ---------- docs ---------- */
-  function addDoc(docItem) {
-    guardOr(() => {
-      const next = structuredClone(trip);
-      next.docs = Array.isArray(next.docs) ? next.docs : [];
-      next.docs.unshift(docItem);
-      persist(next, `Added doc: ${docItem.title || "Untitled"}`);
-    });
-  }
-  function removeDoc(docId) {
-    guardOr(() => {
-      const next = structuredClone(trip);
-      next.docs = (next.docs || []).filter((d) => d.id !== docId);
-      persist(next, "Removed a doc");
-    });
-  }
-  function updateDoc(docId, updated) {
-    guardOr(() => {
-      const next = structuredClone(trip);
-      next.docs = (next.docs || []).map((d) => (d.id === docId ? { ...d, ...updated, updatedAt: Date.now() } : d));
-      persist(next, "Updated a doc");
-    });
+  if (!mounted || loading) return <div className="text-sm text-gray-500">Loading…</div>;
+  if (!trip) {
+    return (
+      <div className="mx-auto max-w-5xl rounded-2xl border border-gray-100 bg-white p-6 text-gray-700">
+        No trip found for <span className="font-mono">{id}</span>.
+        <div className="mt-2 text-xs text-gray-500">
+          Tip: open the trip via <code>/dev/trips</code> and ensure you’re signed in.
+        </div>
+      </div>
+    );
   }
 
-  /* ---------- budget & expenses ---------- */
-  function setEstimatedBudget(n) {
-    guardOr(() => {
-      const next = structuredClone(trip);
-      next.budget = { ...(next.budget || { currency: "USD" }), estimated: n == null ? null : Number(n) };
-      persist(next, "Updated estimated budget");
-    });
-  }
-  function setBudgetCurrency(code) {
-    guardOr(() => {
-      const next = structuredClone(trip);
-      next.budget = { ...(next.budget || {}), currency: code || "USD" };
-      persist(next, `Changed currency to ${code || "USD"}`);
-    });
-  }
-  function setOriginCountry(country) {
-    guardOr(() => {
-      const next = structuredClone(trip);
-      next.originCountry = country || null;
-      persist(next, `Set origin country: ${country || "—"}`);
-    });
-  }
-  function addExpense(expDraft) {
-    guardOr(() => {
-      const next = structuredClone(trip);
-      (next.expenses ||= []).unshift({
-        id: crypto.randomUUID?.() || String(Date.now()),
-        ...expDraft,
-        createdAt: Date.now(),
-      });
-      persist(next, `Added expense: ${expDraft.desc}`);
-    });
-  }
-  function removeExpense(id) {
-    guardOr(() => {
-      const next = structuredClone(trip);
-      next.expenses = (next.expenses || []).filter((e) => e.id !== id);
-      persist(next, "Removed an expense");
-    });
-  }
-
-  /* --------------------- UI --------------------- */
   return (
     <div className="mx-auto max-w-5xl space-y-6 p-4">
+      {/* Save-to-Firestore button */}
+      <section className="rounded-2xl border border-gray-100 bg-white p-5 shadow-md">
+        <div className="flex items-center justify-between">
+          <div className="text-sm text-gray-600">
+            tripId: <code>{trip.id}</code>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleSaveItinerary}
+              disabled={!canSaveItinerary || savingItin}
+              className={`rounded-lg px-3 py-2 text-sm font-semibold text-white ${
+                !canSaveItinerary || savingItin ? "bg-gray-400 cursor-not-allowed" : "bg-gray-900 hover:bg-black"
+              }`}
+              title={!canSaveItinerary ? "Add activities and set dates first" : "Save my itinerary to Firestore"}
+            >
+              {savingItin ? "Saving…" : "Save my itinerary (Firestore)"}
+            </button>
+            {saveStatus === "ok" && <span className="text-green-600 text-sm">Saved!</span>}
+            {saveStatus === "err" && <span className="text-red-600 text-sm">Failed</span>}
+          </div>
+        </div>
+      </section>
+
       <TripMetaEditor trip={trip} onSubmit={handleSubmit} />
 
       {trip.submitted ? (
@@ -491,11 +490,7 @@ export default function TripClient({ id }) {
               onAddMedia={addTripMedia}
             />
             <div className="rounded-2xl border border-gray-100 bg-white p-5 shadow-md">
-              <TransportLinks
-                mode={mode}
-                origin={origin || "Origin"}
-                destination={destination || "Destination"}
-              />
+              <TransportLinks mode={mode} origin={origin || "Origin"} destination={destination || "Destination"} />
             </div>
           </section>
 
@@ -517,66 +512,61 @@ export default function TripClient({ id }) {
               currentUserId={currentUserId}
               ownerId={trip.ownerId}
               originCountry={trip.originCountry || null}
-              onSetEstimatedBudget={setEstimatedBudget}
-              onSetCurrency={setBudgetCurrency}
-              onSetOriginCountry={setOriginCountry}
-              onAddExpense={addExpense}
-              onRemoveExpense={removeExpense}
+              onSetEstimatedBudget={(n) => {
+                const next = structuredClone(trip);
+                next.budget = { ...(next.budget || { currency: "USD" }), estimated: n == null ? null : Number(n) };
+                persist(next, "Updated estimated budget");
+              }}
+              onSetCurrency={(code) => {
+                const next = structuredClone(trip);
+                next.budget = { ...(next.budget || {}), currency: code || "USD" };
+                persist(next, `Changed currency to ${code || "USD"}`);
+              }}
+              onSetOriginCountry={(country) => {
+                const next = structuredClone(trip);
+                next.originCountry = country || null;
+                persist(next, `Set origin country: ${country || "—"}`);
+              }}
+              onAddExpense={(expDraft) => {
+                const next = structuredClone(trip);
+                (next.expenses ||= []).unshift({
+                  id: crypto.randomUUID?.() || String(Date.now()),
+                  ...expDraft,
+                  createdAt: Date.now(),
+                });
+                persist(next, `Added expense: ${expDraft.desc}`);
+              }}
+              onRemoveExpense={(id) => {
+                const next = structuredClone(trip);
+                next.expenses = (next.expenses || []).filter((e) => e.id !== id);
+                persist(next, "Removed an expense");
+              }}
             />
           </section>
 
           {/* Participants — only for group trips */}
           {trip.partyType === "group" && (
             <section className="grid gap-6 md:grid-cols-2">
-              <ParticipantsPanel
-                participants={trip.participants || []}
-                onAdd={addParticipant}
-                onRemove={removeParticipant}
-              />
+              <ParticipantsPanel participants={trip.participants || []} onAdd={addParticipant} onRemove={removeParticipant} />
               <div className="hidden md:block" />
             </section>
           )}
 
-          {/* Day tiles with weekly grouping */}
+          {/* Day tiles */}
           <section>
-            {days <= 9 ? (
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
-                {Array.from({ length: days }).map((_, i) => (
-                  <ItineraryDay
-                    key={i}
-                    dayNumber={i + 1}
-                    activities={trip.activities[i]}
-                    onAdd={(text) => addActivity(i, text)}
-                    onEdit={(idx, text) => editActivity(i, idx, text)}
-                    onRemove={(idx) => removeActivity(i, idx)}
-                    onMove={(fromIdx, toIdx) => moveActivity(i, fromIdx, toIdx)}
-                  />
-                ))}
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {makeWeekRanges(days).map(([start, end], wIdx) => (
-                  <WeekGroup key={wIdx} label={`Week ${wIdx + 1}`} defaultOpen={wIdx === 0}>
-                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
-                      {Array.from({ length: end - start }).map((_, i) => {
-                        const dayIdx = start + i;
-                        return (
-                          <ItineraryDay
-                            key={dayIdx}
-                            dayNumber={dayIdx + 1}
-                            activities={trip.activities[dayIdx]}
-                            onAdd={(text) => addActivity(dayIdx, text)}
-                            onEdit={(idx, text) => editActivity(dayIdx, idx, text)}
-                            onRemove={(idx) => removeActivity(dayIdx, idx)}
-                            onMove={(fromIdx, toIdx) => moveActivity(dayIdx, fromIdx, toIdx)}
-                          />
-                        );
-                      })}
-                    </div>
-                  </WeekGroup>
-                ))}
-              </div>
-            )}
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
+              {Array.from({ length: days }).map((_, i) => (
+                <ItineraryDay
+                  key={i}
+                  dayNumber={i + 1}
+                  activities={trip.activities[i]}
+                  onAdd={(text) => addActivity(i, text)}
+                  onEdit={(idx, text) => editActivity(i, idx, text)}
+                  onRemove={(idx) => removeActivity(i, idx)}
+                  onMove={(fromIdx, toIdx) => moveActivity(i, fromIdx, toIdx)}
+                />
+              ))}
+            </div>
           </section>
 
           {/* Change log */}
@@ -615,8 +605,8 @@ export default function TripClient({ id }) {
         </>
       ) : (
         <section className="rounded-2xl border border-dashed border-gray-200 bg-white p-6 text-sm text-gray-600">
-          Fill the trip details above and click <strong>Submit</strong> to expand the itinerary, docs, media,
-          expenses, participants and chat sections.
+          Fill the trip details above and click <strong>Update</strong> to expand the itinerary, docs,
+          media, expenses, participants and chat sections.
           {!canEdit && <div className="mt-2 text-red-500">Sign in to save your trip and make changes.</div>}
         </section>
       )}

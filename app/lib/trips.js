@@ -14,10 +14,7 @@ import {
   FieldPath,
 } from "firebase/firestore";
 
-/**
- * Create a new trip owned by `ownerUid`.
- * Returns the new trip id.
- */
+/** Create a new trip owned by `ownerUid`. Returns the new trip id. */
 export async function createTrip(ownerUid, title = "Untitled Trip") {
   if (!ownerUid) throw new Error("createTrip: missing ownerUid");
 
@@ -25,7 +22,7 @@ export async function createTrip(ownerUid, title = "Untitled Trip") {
     title,
     ownerUid,
     archived: false,
-    participants: { [ownerUid]: "owner" }, // map of uid -> role
+    participants: { [ownerUid]: "owner" }, // uid -> role
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   };
@@ -34,11 +31,7 @@ export async function createTrip(ownerUid, title = "Untitled Trip") {
   return ref.id;
 }
 
-/**
- * List trips for a user:
- *  - Owned by me
- *  - Shared with me (participants.<uid> in ["viewer","editor"])
- */
+/** List trips for a user (owned + shared) */
 export async function listMyTrips(userUid) {
   if (!userUid) return { owned: [], shared: [] };
 
@@ -51,7 +44,7 @@ export async function listMyTrips(userUid) {
   const ownedSnap = await getDocs(ownedQ);
   const owned = ownedSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
 
-  // Shared (may need a composite index on first run)
+  // Shared (may require an index on first run)
   let shared = [];
   try {
     const sharedQ = query(
@@ -62,37 +55,14 @@ export async function listMyTrips(userUid) {
     const sharedSnap = await getDocs(sharedQ);
     shared = sharedSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
   } catch (e) {
-    console.warn("listMyTrips(shared) query failed or needs index:", e?.message || e);
+    console.warn("listMyTrips(shared) needs index or failed:", e?.message || e);
     shared = [];
   }
 
   return { owned, shared };
 }
 
-/**
- * Convenience: list trips I can see (but don't own).
- * (Used by /dev/trips page expecting listTripsICanSee.)
- */
-export async function listTripsICanSee(userUid) {
-  if (!userUid) return [];
-
-  try {
-    const q = query(
-      collection(db, "trips"),
-      where(new FieldPath("participants", userUid), "in", ["viewer", "editor"]),
-      orderBy("createdAt", "desc")
-    );
-    const snap = await getDocs(q);
-    return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-  } catch (e) {
-    console.warn("listTripsICanSee query failed or needs index:", e?.message || e);
-    return [];
-  }
-}
-
-/**
- * Archive/unarchive a trip (owner typically).
- */
+/** Archive/unarchive a trip */
 export async function setTripArchived(tripId, archived, userUid) {
   if (!tripId) throw new Error("setTripArchived: missing tripId");
   if (!userUid) throw new Error("setTripArchived: missing userUid");
@@ -104,25 +74,33 @@ export async function setTripArchived(tripId, archived, userUid) {
   );
 }
 
-/**
- * Write editable trip metadata to Firestore.
- * Uses merge to create-or-update safely.
- */
+/** Rename a trip (owner-only by rules) */
+export async function renameTrip(tripId, title, userUid) {
+  if (!tripId) throw new Error("renameTrip: missing tripId");
+  if (!userUid) throw new Error("renameTrip: missing userUid");
+  await setDoc(
+    doc(db, "trips", tripId),
+    { title: String(title || "Untitled Trip"), updatedAt: serverTimestamp() },
+    { merge: true }
+  );
+}
+
+/** Write editable trip metadata (owner-only by rules) */
 export async function writeTripMeta(tripId, updates, userUid) {
   if (!tripId) throw new Error("writeTripMeta: missing tripId");
   if (!userUid) throw new Error("writeTripMeta: missing userUid");
 
   const ref = doc(db, "trips", tripId);
 
-  // Optional sanity read (helpful while wiring things up)
+  // Optional sanity read while wiring up
   try {
     const snap = await getDoc(ref);
     if (!snap.exists()) {
-      console.warn("writeTripMeta: trip doc did not exist; will create via merge.");
+      console.warn("writeTripMeta: trip did not exist; creating via merge.");
     } else {
       const data = snap.data() || {};
       if (data.ownerUid && data.ownerUid !== userUid) {
-        console.warn("writeTripMeta: current user is not the owner; relying on rules.");
+        console.warn("writeTripMeta: current user not owner; relying on rules.");
       }
     }
   } catch (e) {
@@ -146,18 +124,24 @@ export async function writeTripMeta(tripId, updates, userUid) {
   await setDoc(ref, payload, { merge: true });
 }
 
-/**
- * Save/update the trip's shared itinerary template (array of day arrays).
- * Intended to be called by the owner after edits.
- */
+/** Save/update the shared itinerary template (owner writes this) */
 export async function setItineraryTemplate(tripId, ownerUid, activities) {
-  if (!tripId) throw new Error("setItineraryTemplate: missing tripId");
-  if (!ownerUid) throw new Error("setItineraryTemplate: missing ownerUid");
+  if (!tripId || !ownerUid) return;
+
+  // Flatten day -> "item1|||item2|||item3" so we store string[] (no nested arrays)
+  const days = Array.isArray(activities)
+    ? activities.map(day =>
+        Array.isArray(day)
+          ? day.map(s => String(s || "")).join("|||")
+          : String(day || "")
+      )
+    : [];
 
   await setDoc(
     doc(db, "trips", tripId),
     {
-      itineraryTemplate: Array.isArray(activities) ? activities : [],
+      // use a new field name to avoid confusion with any older data
+      itineraryTemplateDays: days,
       itineraryTemplateUpdatedAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     },
@@ -165,10 +149,34 @@ export async function setItineraryTemplate(tripId, ownerUid, activities) {
   );
 }
 
-/**
- * Convenience wrapper expected by /dev/trips — rename trip title.
- */
-export async function renameTrip(tripId, title, userUid) {
-  if (!tripId) throw new Error("renameTrip: missing tripId");
-  return writeTripMeta(tripId, { title }, userUid);
+
+/** Save MY (per-user) itinerary subdoc under the trip */
+export async function saveMyItinerary(tripId, userUid, daysArray) {
+  if (!tripId) throw new Error("saveMyItinerary: missing tripId");
+  if (!userUid) throw new Error("saveMyItinerary: missing userUid");
+  if (!Array.isArray(daysArray)) throw new Error("saveMyItinerary: daysArray must be an array");
+
+  // We store each day as a single string joined by delimiter to avoid nested arrays
+  const DELIM = "|||";
+  const asStrings = daysArray.map((day) =>
+    Array.isArray(day) ? day.map((s) => String(s ?? "")).join(DELIM) : ""
+  );
+
+  await setDoc(
+    doc(db, "trips", tripId, "itineraries", userUid),
+    {
+      days: asStrings,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true }
+  );
+}
+
+/** (NEW) Read trip meta from Firestore (used when localStorage is empty) */
+export async function getTripMeta(tripId) {
+  if (!tripId) throw new Error("getTripMeta: missing tripId");
+  const ref = doc(db, "trips", tripId);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) return null;
+  return { id: snap.id, ...snap.data() };
 }
