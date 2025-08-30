@@ -2,7 +2,9 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useAuth } from "../../context/AuthProvider";
 import { loadTrip, loadDraft, saveTrip } from "../../lib/storage";
+
 import TransportLinks from "../../components/TransportLinks";
 import ParticipantsPanel from "../../components/ParticipantsPanel";
 import ItineraryDay from "../../components/ItineraryDay";
@@ -12,20 +14,20 @@ import ExportPDFButton from "../../components/ExportPDFButton";
 import TripMediaGallery from "../../components/TripMediaGallery";
 import TripDocsTile from "../../components/TripDocsTile";
 import ExpenseTracker from "../../components/ExpenseTracker";
-import { putMediaBlob } from "../../lib/mediaStore";
-import { useAuth } from "../../context/AuthProvider";
 
-// Firestore helpers
 import {
   writeTripMeta,
   setItineraryTemplate,
-  saveMyItinerary,
-  getTripMeta,
+  readTripMeta,
+  templateToUiActivities,
 } from "../../lib/trips";
+
+import { db } from "../../lib/firebaseClient";
+import { doc, onSnapshot } from "firebase/firestore";
 
 const MAX_MEDIA_BYTES = 250 * 1024 * 1024;
 
-// ---------- helpers ----------
+// ------ helpers ------
 function seedActivities(nights) {
   const days = Math.max(1, Number(nights ?? 1) + 1);
   return Array.from({ length: days }, (_, i) => {
@@ -42,164 +44,203 @@ function fmtRange(startISO, endISO) {
   const opts = { year: "numeric", month: "short", day: "numeric" };
   return `${s.toLocaleDateString(undefined, opts)} → ${e.toLocaleDateString(undefined, opts)}`;
 }
-function calcNights(sISO, eISO) {
-  if (!sISO || !eISO) return 4;
-  const s = new Date(sISO);
-  const e = new Date(eISO);
-  if (isNaN(s) || isNaN(e) || e < s) return 4;
-  const diff = Math.round((e - s) / (1000 * 60 * 60 * 24));
-  return Math.max(0, diff);
-}
-function countDaysInclusive(sISO, eISO, fallback) {
-  if (!sISO || !eISO) return Math.max(1, fallback || 1);
-  const s = new Date(sISO);
-  const e = new Date(eISO);
-  if (isNaN(s) || isNaN(e) || e < s) return Math.max(1, fallback || 1);
-  const diff = Math.round((e - s) / (1000 * 60 * 60 * 24));
-  return Math.max(1, diff + 1); // days = nights + 1
+function groupIntoWeeks(activities) {
+  const weeks = [];
+  for (let i = 0; i < activities.length; i += 7) weeks.push(activities.slice(i, i + 7));
+  return weeks;
 }
 
 export default function TripClient({ id }) {
   const { user, loading } = useAuth();
+  const canEdit = !!user;
+  const currentUserId = user?.email || user?.uid || "anon@local";
+
   const [mounted, setMounted] = useState(false);
   const [trip, setTrip] = useState(null);
-  const [savingItin, setSavingItin] = useState(false);
-  const [saveStatus, setSaveStatus] = useState("");
+  const [saveMsg, setSaveMsg] = useState("");
+  const [notFound, setNotFound] = useState(false);
+  const [needsAuth, setNeedsAuth] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   const prevUserRef = useRef(null);
+  const unsubRef = useRef(null);
 
-  const canEdit = !!user; // ✅ declared once here
-  const currentUserId = user?.email || user?.uid || "anon@local";
+  // compute nights/days and activities shape from current trip
+  const nights = Number(trip?.nights ?? 4);
+  const daysCount = Math.max(1, nights + 1);
+
+  const activities = useMemo(() => {
+    const acts = Array.isArray(trip?.activities) ? trip.activities : [];
+    if (acts.length !== daysCount) {
+      const next = acts.slice(0, daysCount);
+      while (next.length < daysCount) next.push(["Morning activity", "Explore", "Group dinner"]);
+      return next;
+    }
+    return acts;
+  }, [trip?.activities, daysCount]);
+
+  const useWeekly = activities.length > 9;
+  const weeks = useMemo(() => groupIntoWeeks(activities), [activities]);
 
   useEffect(() => setMounted(true), []);
 
-  // INITIAL LOAD: localStorage → Firestore fallback
   useEffect(() => {
     if (!mounted) return;
 
-    (async () => {
-      // 1) Try localStorage
-      const byId = loadTrip(id);
-      const draft = loadDraft();
-      let initialRaw = byId || draft || null;
+    // Always require sign-in for remote load
+    if (!user) {
+      const byId = loadTrip(id) || loadDraft();
+      if (byId) {
+        setTrip({ id, ...byId });
+        setNeedsAuth(true); // read-only until sign-in
+        setNotFound(false);
+      } else {
+        setTrip(null);
+        setNeedsAuth(true);
+        setNotFound(false);
+      }
+      if (unsubRef.current) { unsubRef.current(); unsubRef.current = null; }
+      return;
+    }
 
-      // 2) If not found locally, try Firestore
-      if (!initialRaw) {
-        try {
-          const meta = await getTripMeta(id);
-          if (meta) {
-            const nights = calcNights(meta.startDate, meta.endDate);
-            const activities = seedActivities(nights);
-            initialRaw = {
-              id,
-              title: meta.title || "Untitled Trip",
-              ownerUid: meta.ownerUid || null,
-              origin: meta.origin || "",
-              destination: meta.destination || "",
-              startDate: meta.startDate || null,
-              endDate: meta.endDate || null,
-              transport: meta.transport || "flights",
-              vibe: meta.vibe || "adventure",
-              partyType: meta.partyType || "solo",
-              budgetModel: meta.budgetModel || "individual",
-              activities,
-              nights,
-              participants: [],
-              chat: [],
-              media: [],
-              docs: [],
-              submitted: Boolean(meta.submitted),
-              changeLog: [],
-              originCountry: null,
-              lastUserId: currentUserId,
-            };
-            saveTrip(id, initialRaw);
+    // Signed in: Firestore is the source of truth + realtime subscription
+    let cancelled = false;
+    async function setup() {
+      try {
+        const remote = await readTripMeta(id);
+        if (!remote) {
+          if (!cancelled) {
+            setTrip(null);
+            setNotFound(true);
+            setNeedsAuth(false);
           }
-        } catch (e) {
-          console.warn("TripClient: Firestore fetch failed (read rules or not owner?):", e);
+          return;
+        }
+
+        const normalized = buildTripStateFromRemote(remote, id, currentUserId);
+        if (!cancelled) {
+          setTrip(normalized);
+          setDirty(false);
+          setNotFound(false);
+          setNeedsAuth(false);
+          prevUserRef.current = currentUserId;
+          saveTrip(id, normalized);
+        }
+
+        if (unsubRef.current) unsubRef.current();
+        unsubRef.current = onSnapshot(doc(db, "trips", id), (snap) => {
+          if (!snap.exists()) {
+            setTrip(null);
+            setNotFound(true);
+            setNeedsAuth(false);
+            return;
+          }
+          const live = buildTripStateFromRemote({ id: snap.id, ...snap.data() }, id, currentUserId);
+          setTrip((prev) => {
+            const keepLog = (prev && Array.isArray(prev.changeLog)) ? prev.changeLog : [];
+            const merged = { ...live, changeLog: keepLog };
+            saveTrip(id, merged);
+            return merged;
+          });
+          setDirty(false);
+        }, (err) => {
+          console.error("trip onSnapshot error:", err);
+        });
+      } catch (e) {
+        console.error("readTripMeta failed:", e);
+        if (!cancelled) {
+          setTrip(null);
+          setNotFound(true);
+          setNeedsAuth(false);
         }
       }
+    }
 
-      if (!initialRaw) {
-        setTrip(null);
-        return;
+    setup();
+    return () => {
+      cancelled = true;
+      if (unsubRef.current) { unsubRef.current(); unsubRef.current = null; }
+    };
+  }, [id, mounted, user, currentUserId]);
+
+  function buildTripStateFromRemote(remote, id, currentUserId) {
+    // Derive nights/days
+    let n0 = Number(remote.nights ?? 4);
+    if (remote.startDate && remote.endDate) {
+      const s = new Date(remote.startDate);
+      const e = new Date(remote.endDate);
+      if (!isNaN(s) && !isNaN(e) && e >= s) {
+        const diff = Math.round((e - s) / (1000 * 60 * 60 * 24));
+        n0 = Math.max(0, diff);
       }
+    }
+    const days0 = Math.max(1, n0 + 1);
 
-      // Normalize activities to days
-      const nights = Number(initialRaw.nights ?? calcNights(initialRaw.startDate, initialRaw.endDate));
-      const days = Math.max(1, nights + 1);
-      const baseActs = Array.isArray(initialRaw.activities)
-        ? initialRaw.activities
-        : seedActivities(nights);
-      let normalizedActs = baseActs.slice(0, days);
-      while (normalizedActs.length < days)
-        normalizedActs.push(["Morning activity", "Explore", "Group dinner"]);
+    // Activities: legacy string[][] OR new {days:[{items:[]}]}
+    let acts0 = remote.itineraryTemplate != null
+      ? templateToUiActivities(remote.itineraryTemplate)
+      : seedActivities(n0);
 
-      // Budget & other arrays
-      const participants = Array.isArray(initialRaw.participants) ? initialRaw.participants : [];
-      const chat = Array.isArray(initialRaw.chat) ? initialRaw.chat : [];
-      const media = Array.isArray(initialRaw.media) ? initialRaw.media : [];
-      const docs = Array.isArray(initialRaw.docs) ? initialRaw.docs : [];
-      const budget =
-        initialRaw.budget && typeof initialRaw.budget === "object"
-          ? { currency: initialRaw.budget.currency || "USD", estimated: initialRaw.budget.estimated ?? null }
-          : { currency: "USD", estimated: null };
-      const expenses = Array.isArray(initialRaw.expenses) ? initialRaw.expenses : [];
+    acts0 = acts0.slice(0, days0);
+    while (acts0.length < days0)
+      acts0.push(["Morning activity", "Explore", "Group dinner"]);
 
-      const initial = {
-        id,
-        ...initialRaw,
-        nights,
-        activities: normalizedActs,
-        participants,
-        chat,
-        media,
-        docs,
-        budget,
-        expenses,
-        partyType: initialRaw.partyType || "solo",
-        budgetModel: initialRaw.budgetModel || "individual",
-        ownerId: initialRaw.ownerId || currentUserId,
-        submitted: Boolean(initialRaw.submitted),
-        changeLog: Array.isArray(initialRaw.changeLog) ? initialRaw.changeLog : [],
-        originCountry: initialRaw.originCountry || null,
-        lastUserId: initialRaw.lastUserId || currentUserId,
-      };
+    const participants = Array.isArray(remote.participants) ? remote.participants : [];
+    const chat = Array.isArray(remote.chat) ? remote.chat : [];
+    const media = Array.isArray(remote.media) ? remote.media : [];
+    const docs = Array.isArray(remote.docs) ? remote.docs : [];
 
-      // Reset change log if opened by a different user (until real multiuser sync)
-      if (initial.lastUserId !== currentUserId) {
-        initial.changeLog = [];
-        initial.lastUserId = currentUserId;
-      }
+    const budget =
+      remote.budget && typeof remote.budget === "object"
+        ? {
+            currency: remote.budget.currency || "USD",
+            estimated:
+              remote.budget.estimated === null
+                ? null
+                : Number(remote.budget.estimated ?? 0),
+          }
+        : { currency: "USD", estimated: null };
 
-      setTrip(initial);
-      saveTrip(id, initial);
-      prevUserRef.current = currentUserId;
-    })();
-  }, [id, mounted, currentUserId]);
+    const expenses = Array.isArray(remote.expenses) ? remote.expenses : [];
+    const partyType = remote.partyType || "solo";
+    const budgetModel = remote.budgetModel || "individual";
+    const ownerId = remote.ownerId || remote.ownerUid || "";
+    const submitted = Boolean(remote.submitted);
+    const changeLog = Array.isArray(remote.changeLog) ? remote.changeLog : [];
+    const originCountry = remote.originCountry || null;
 
-  const origin = trip?.origin || "";
-  const destination = trip?.destination || "";
-  const nights = Number(trip?.nights ?? 4);
-  const days = Math.max(1, nights + 1);
-  const mode = trip?.transport || "flights";
-  const vibe = trip?.vibe || "adventure";
-  const dateRange = fmtRange(trip?.startDate, trip?.endDate);
+    return {
+      id,
+      ...remote,
+      nights: n0,
+      activities: acts0,
+      participants,
+      chat,
+      media,
+      docs,
+      budget,
+      expenses,
+      partyType,
+      budgetModel,
+      ownerId,
+      submitted,
+      changeLog,
+      originCountry,
+      lastUserId: currentUserId,
+    };
+  }
 
-  // --- derived helpers ---
-  const canSaveItinerary = useMemo(() => {
-    if (!user || !trip || !trip.id) return false;
-    const acts = Array.isArray(trip.activities) ? trip.activities : [];
-    return acts.length > 0;
-  }, [user, trip]);
-
-  // ---------- utility ----------
+  // --------- guards & persist ----------
   function guardOr(fn) {
     if (!canEdit) {
       alert("Please sign in to make changes.");
       return;
     }
     fn();
+  }
+  function markDirty() {
+    setDirty(true);
   }
   function persist(next, logText) {
     if (!canEdit) {
@@ -221,26 +262,44 @@ export default function TripClient({ id }) {
     next.lastUserId = currentUserId;
     saveTrip(trip.id, next);
     setTrip(next);
+    markDirty();
   }
 
-  // ---------- SAVE ITINERARY to Firestore ----------
-  async function handleSaveItinerary() {
-    if (!user || !trip?.id) return;
-    setSavingItin(true);
-    setSaveStatus("");
+  // ---------- Firestore SAVE (meta + template together) ----------
+  async function saveAllToFirestore(current) {
+    if (!canEdit) return;
+    setSaving(true);
     try {
-      const wanted = countDaysInclusive(trip.startDate, trip.endDate, trip.activities?.length || 1);
-      const padded = Array.from({ length: wanted }, (_, i) =>
-        (Array.isArray(trip.activities?.[i]) ? trip.activities[i] : []).map((s) => String(s ?? ""))
-      );
-      await saveMyItinerary(trip.id, user.uid, padded);
-      setSaveStatus("ok");
+      const meta = {
+        title: current.title,
+        origin: current.origin,
+        destination: current.destination,
+        startDate: current.startDate,
+        endDate: current.endDate,
+        transport: current.transport,
+        vibe: current.vibe,
+        partyType: current.partyType,
+        budgetModel: current.budgetModel,
+        submitted: current.submitted === true,
+        budget: current.budget ?? null,
+        originCountry: current.originCountry ?? null,
+        nights: current.nights,
+      };
+
+      await Promise.all([
+        writeTripMeta(current.id, meta, user?.uid),
+        setItineraryTemplate(current.id, user?.uid, current.activities),
+      ]);
+
+      setSaveMsg("Saved to Firestore.");
+      setDirty(false);
+      setTimeout(() => setSaveMsg(""), 2000);
     } catch (e) {
-      console.error("Save itinerary failed:", e);
-      setSaveStatus("err");
+      console.error("saveAllToFirestore failed:", e);
+      setSaveMsg("Save failed. Check permissions / rules.");
+      setTimeout(() => setSaveMsg(""), 3000);
     } finally {
-      setSavingItin(false);
-      setTimeout(() => setSaveStatus(""), 2500);
+      setSaving(false);
     }
   }
 
@@ -301,6 +360,11 @@ export default function TripClient({ id }) {
   function currentMediaBytes() {
     return (trip.media || []).reduce((sum, m) => sum + (m.size || 0), 0);
   }
+  async function putMediaBlob(id, file) {
+    if (!file) return;
+    const buf = await file.arrayBuffer?.();
+    if (!buf) return;
+  }
   async function addTripMedia(files) {
     if (!canEdit) {
       alert("Please sign in to upload media.");
@@ -324,9 +388,17 @@ export default function TripClient({ id }) {
 
     const metas = [];
     for (const f of list) {
-      const mediaId = (crypto?.randomUUID && crypto.randomUUID()) || `${Date.now()}-${Math.random()}`;
+      const mediaId =
+        (crypto?.randomUUID && crypto.randomUUID()) ||
+        `${Date.now()}-${Math.random()}`;
       await putMediaBlob(mediaId, f);
-      metas.push({ id: mediaId, name: f.name, type: f.type, size: f.size, createdAt: Date.now() });
+      metas.push({
+        id: mediaId,
+        name: f.name,
+        type: f.type,
+        size: f.size,
+        createdAt: Date.now(),
+      });
     }
 
     const next = structuredClone(trip);
@@ -335,13 +407,41 @@ export default function TripClient({ id }) {
     return metas.map((m) => m.id);
   }
 
+  // ---------- chat ----------
+  function appendChat(text, mediaIds = [], from = currentUserId) {
+    guardOr(() => {
+      const next = structuredClone(trip);
+      (next.chat ||= []).push({
+        id: (crypto?.randomUUID && crypto.randomUUID()) || String(Date.now()),
+        from,
+        text: text || "",
+        mediaIds,
+        at: Date.now(),
+      });
+      persist(next, `New chat message from ${from}`);
+    });
+  }
+  async function handleChatSend(text, files) {
+    if (!canEdit) {
+      alert("Please sign in to send messages.");
+      return;
+    }
+    let mediaIds = [];
+    if (files && files.length > 0) mediaIds = await addTripMedia(files);
+    if ((text && text.trim()) || mediaIds.length > 0) {
+      appendChat(text.trim(), mediaIds);
+    } else if (files?.length) {
+      throw new Error("Media not sent — trip has reached the 250 MB limit.");
+    }
+  }
+
   // ---------- docs ----------
-  function addDoc(docObj) {
+  function addDocMeta(docMeta) {
     guardOr(() => {
       const next = structuredClone(trip);
       next.docs = Array.isArray(next.docs) ? next.docs : [];
-      next.docs.unshift(docObj);
-      persist(next, `Added doc: ${docObj?.title || "Untitled"}`);
+      next.docs.unshift(docMeta);
+      persist(next, `Added doc: ${docMeta.title || "Untitled"}`);
     });
   }
   function removeDoc(docId) {
@@ -354,12 +454,55 @@ export default function TripClient({ id }) {
   function updateDoc(docId, updated) {
     guardOr(() => {
       const next = structuredClone(trip);
-      next.docs = (next.docs || []).map((d) => (d.id === docId ? { ...d, ...updated, updatedAt: Date.now() } : d));
+      next.docs = (next.docs || []).map((d) =>
+        d.id === docId ? { ...d, ...updated, updatedAt: Date.now() } : d
+      );
       persist(next, "Updated a doc");
     });
   }
 
-  // ---------- trip meta submit ----------
+  // ---------- budget & expenses ----------
+  function setEstimatedBudget(n) {
+    guardOr(() => {
+      const next = structuredClone(trip);
+      next.budget = { ...(next.budget || { currency: "USD" }), estimated: n == null ? null : Number(n) };
+      persist(next, "Updated estimated budget");
+    });
+  }
+  function setBudgetCurrency(code) {
+    guardOr(() => {
+      const next = structuredClone(trip);
+      next.budget = { ...(next.budget || {}), currency: code || "USD" };
+      persist(next, `Changed currency to ${code || "USD"}`);
+    });
+  }
+  function setOriginCountry(country) {
+    guardOr(() => {
+      const next = structuredClone(trip);
+      next.originCountry = country || null;
+      persist(next, `Set origin country: ${country || "—"}`);
+    });
+  }
+  function addExpense(expDraft) {
+    guardOr(() => {
+      const next = structuredClone(trip);
+      (next.expenses ||= []).unshift({
+        id: crypto.randomUUID?.() || String(Date.now()),
+        ...expDraft,
+        createdAt: Date.now(),
+      });
+      persist(next, `Added expense: ${expDraft.desc}`);
+    });
+  }
+  function removeExpense(id) {
+    guardOr(() => {
+      const next = structuredClone(trip);
+      next.expenses = (next.expenses || []).filter((e) => e.id !== id);
+      persist(next, "Removed an expense");
+    });
+  }
+
+  // ---------- SUBMIT (TripMetaEditor) ----------
   async function handleSubmit(updates) {
     guardOr(async () => {
       const base = { ...trip, ...(updates || {}) };
@@ -390,72 +533,73 @@ export default function TripClient({ id }) {
         submitted: true,
       };
 
-      // Persist locally
       persist(next, "Updated trip details");
-
-      // Firestore: editable trip meta
-      try {
-        await writeTripMeta(
-          next.id,
-          {
-            title: next.title ?? null,
-            origin: next.origin ?? null,
-            destination: next.destination ?? null,
-            startDate: next.startDate ?? null,
-            endDate: next.endDate ?? null,
-            transport: next.transport ?? null,
-            vibe: next.vibe ?? null,
-            partyType: next.partyType ?? null,
-            budgetModel: next.budgetModel ?? null,
-            submitted: next.submitted ?? false,
-          },
-          user?.uid
-        );
-
-        // If I'm the owner, also update the shared itinerary template (optional)
-        const isOwner = user?.uid && (next?.ownerUid === user.uid || next?.ownerId === user.uid);
-        if (isOwner) {
-          await setItineraryTemplate(next.id, user.uid, next.activities);
-        }
-      } catch (err) {
-        console.error("Failed writing trip meta/template:", err);
-      }
+      await saveAllToFirestore(next);
     });
   }
 
+  // ---------- explicit UPDATE button (meta + template) ----------
+  async function handleUpdateClick() {
+    if (!canEdit) return;
+    await saveAllToFirestore(trip);
+  }
+
+  // ---------- render ----------
   if (!mounted || loading) return <div className="text-sm text-gray-500">Loading…</div>;
-  if (!trip) {
+
+  if (needsAuth) {
     return (
       <div className="mx-auto max-w-5xl rounded-2xl border border-gray-100 bg-white p-6 text-gray-700">
-        No trip found for <span className="font-mono">{id}</span>.
-        <div className="mt-2 text-xs text-gray-500">
-          Tip: open the trip via <code>/dev/trips</code> and ensure you’re signed in.
-        </div>
+        <h2 className="text-lg font-semibold mb-2">Sign in required</h2>
+        <p className="text-sm text-gray-600">Please sign in to view and edit this trip.</p>
+        <a
+          href="/dev/firestore-check"
+          className="mt-3 inline-block rounded-lg bg-gray-900 px-3 py-2 text-sm font-semibold text-white hover:bg-black"
+        >
+          Sign in
+        </a>
       </div>
     );
   }
 
+  if (notFound || !trip) {
+    return (
+      <div className="mx-auto max-w-5xl rounded-2xl border border-gray-100 bg-white p-6 text-gray-700">
+        No trip found for <span className="font-mono">{id}</span>.
+      </div>
+    );
+  }
+
+  const origin = trip.origin || "";
+  const destination = trip.destination || "";
+  const dateRange = fmtRange(trip.startDate, trip.endDate);
+
   return (
     <div className="mx-auto max-w-5xl space-y-6 p-4">
-      {/* Save-to-Firestore button */}
       <section className="rounded-2xl border border-gray-100 bg-white p-5 shadow-md">
-        <div className="flex items-center justify-between">
-          <div className="text-sm text-gray-600">
-            tripId: <code>{trip.id}</code>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-3">
+            <span className="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-800">
+              active
+            </span>
+            <span className="text-xs text-gray-500">
+              tripId: <span className="font-mono">{trip.id}</span>
+            </span>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
             <button
-              onClick={handleSaveItinerary}
-              disabled={!canSaveItinerary || savingItin}
-              className={`rounded-lg px-3 py-2 text-sm font-semibold text-white ${
-                !canSaveItinerary || savingItin ? "bg-gray-400 cursor-not-allowed" : "bg-gray-900 hover:bg-black"
+              onClick={handleUpdateClick}
+              disabled={!canEdit || saving || !dirty}
+              className={`rounded-lg px-3 py-2 text-sm font-semibold ${
+                !canEdit || saving || !dirty
+                  ? "bg-gray-200 text-gray-500"
+                  : "bg-gray-900 text-white hover:bg-black"
               }`}
-              title={!canSaveItinerary ? "Add activities and set dates first" : "Save my itinerary to Firestore"}
+              title={dirty ? "Save meta + itinerary to Firestore" : "No unsaved changes"}
             >
-              {savingItin ? "Saving…" : "Save my itinerary (Firestore)"}
+              {saving ? "Saving..." : dirty ? "Update (Firestore)" : "Up to date"}
             </button>
-            {saveStatus === "ok" && <span className="text-green-600 text-sm">Saved!</span>}
-            {saveStatus === "err" && <span className="text-red-600 text-sm">Failed</span>}
+            {saveMsg && <span className="text-sm text-gray-600">{saveMsg}</span>}
           </div>
         </div>
       </section>
@@ -463,152 +607,174 @@ export default function TripClient({ id }) {
       <TripMetaEditor trip={trip} onSubmit={handleSubmit} />
 
       {trip.submitted ? (
-        <>
-          <section className="card">
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <h2 className="text-xl font-bold">
-                {(destination || "Destination")} — {days} day{days > 1 ? "s" : ""} / {nights} night{nights > 1 ? "s" : ""}
-              </h2>
-              {dateRange && <div className="text-sm text-gray-600">{dateRange}</div>}
-            </div>
-
-            <div className="mt-3 flex flex-wrap gap-2">
-              <span className="badge">Party: {trip?.partyType || "solo"}</span>
-              <span className="badge">Budget: {trip?.budgetModel || "individual"}</span>
-              <span className="badge">Mode: {mode}</span>
-              <span className="badge">Vibe: {vibe}</span>
-              {!canEdit && <span className="badge border-red-200 bg-red-50 text-red-700">Read-only</span>}
-            </div>
-          </section>
-
-          {/* Media + Transport */}
-          <section className="grid gap-6 md:grid-cols-2">
-            <TripMediaGallery
-              tripId={trip.id}
-              media={trip.media || []}
-              partyType={trip.partyType || "solo"}
-              onAddMedia={addTripMedia}
-            />
-            <div className="rounded-2xl border border-gray-100 bg-white p-5 shadow-md">
-              <TransportLinks mode={mode} origin={origin || "Origin"} destination={destination || "Destination"} />
-            </div>
-          </section>
-
-          {/* Docs + Expense Tracker */}
-          <section className="grid gap-6 md:grid-cols-2">
-            <TripDocsTile
-              docs={trip.docs || []}
-              canEdit={canEdit}
-              onAdd={addDoc}
-              onRemove={removeDoc}
-              onUpdate={updateDoc}
-            />
-            <ExpenseTracker
-              mode={trip.partyType === "group" ? "group" : "solo"}
-              currency={trip.budget?.currency || "USD"}
-              estimatedBudget={trip.budget?.estimated ?? null}
-              expenses={trip.expenses || []}
-              participants={trip.participants || []}
-              currentUserId={currentUserId}
-              ownerId={trip.ownerId}
-              originCountry={trip.originCountry || null}
-              onSetEstimatedBudget={(n) => {
-                const next = structuredClone(trip);
-                next.budget = { ...(next.budget || { currency: "USD" }), estimated: n == null ? null : Number(n) };
-                persist(next, "Updated estimated budget");
-              }}
-              onSetCurrency={(code) => {
-                const next = structuredClone(trip);
-                next.budget = { ...(next.budget || {}), currency: code || "USD" };
-                persist(next, `Changed currency to ${code || "USD"}`);
-              }}
-              onSetOriginCountry={(country) => {
-                const next = structuredClone(trip);
-                next.originCountry = country || null;
-                persist(next, `Set origin country: ${country || "—"}`);
-              }}
-              onAddExpense={(expDraft) => {
-                const next = structuredClone(trip);
-                (next.expenses ||= []).unshift({
-                  id: crypto.randomUUID?.() || String(Date.now()),
-                  ...expDraft,
-                  createdAt: Date.now(),
-                });
-                persist(next, `Added expense: ${expDraft.desc}`);
-              }}
-              onRemoveExpense={(id) => {
-                const next = structuredClone(trip);
-                next.expenses = (next.expenses || []).filter((e) => e.id !== id);
-                persist(next, "Removed an expense");
-              }}
-            />
-          </section>
-
-          {/* Participants — only for group trips */}
-          {trip.partyType === "group" && (
-            <section className="grid gap-6 md:grid-cols-2">
-              <ParticipantsPanel participants={trip.participants || []} onAdd={addParticipant} onRemove={removeParticipant} />
-              <div className="hidden md:block" />
-            </section>
-          )}
-
-          {/* Day tiles */}
-          <section>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
-              {Array.from({ length: days }).map((_, i) => (
-                <ItineraryDay
-                  key={i}
-                  dayNumber={i + 1}
-                  activities={trip.activities[i]}
-                  onAdd={(text) => addActivity(i, text)}
-                  onEdit={(idx, text) => editActivity(i, idx, text)}
-                  onRemove={(idx) => removeActivity(i, idx)}
-                  onMove={(fromIdx, toIdx) => moveActivity(i, fromIdx, toIdx)}
-                />
-              ))}
-            </div>
-          </section>
-
-          {/* Change log */}
-          <section className="rounded-2xl border border-gray-100 bg-white p-5 shadow-md">
-            <h3 className="mb-2 text-base font-semibold">Trip Log (clears on sign-out)</h3>
-            {(!trip.changeLog || trip.changeLog.length === 0) ? (
-              <p className="text-sm text-gray-500">No changes yet.</p>
-            ) : (
-              <ul className="space-y-2">
-                {trip.changeLog.map((e) => (
-                  <li key={e.id} className="text-sm text-gray-700">
-                    <span className="text-gray-500">{new Date(e.at).toLocaleString()} · </span>
-                    <span className="font-medium">{e.by}:</span> {e.text}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-
-          <div className="mt-6 flex items-center gap-3">
-            <ExportPDFButton trip={trip} />
+        <section className="rounded-2xl border border-gray-100 bg-white p-5 shadow-md">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <h2 className="text-xl font-bold">
+              {(destination || "Destination")} — {daysCount} day{daysCount > 1 ? "s" : ""} / {nights} night{nights > 1 ? "s" : ""}
+            </h2>
+            {dateRange && <div className="text-sm text-gray-600">{dateRange}</div>}
           </div>
 
-          {/* Chat only when signed in and group */}
-          {!!canEdit && trip?.partyType !== "solo" && (
-            <ChatBox
-              me={currentUserId}
-              tripId={trip.id}
-              messages={trip.chat || []}
-              mediaIndex={trip.media || []}
-              onSend={handleChatSend}
-              docked
-              startOpen
-            />
-          )}
-        </>
-      ) : (
-        <section className="rounded-2xl border border-dashed border-gray-200 bg-white p-6 text-sm text-gray-600">
-          Fill the trip details above and click <strong>Update</strong> to expand the itinerary, docs,
-          media, expenses, participants and chat sections.
-          {!canEdit && <div className="mt-2 text-red-500">Sign in to save your trip and make changes.</div>}
+          <div className="mt-3 flex flex-wrap gap-2">
+            <span className="badge">Party: {trip?.partyType || "solo"}</span>
+            <span className="badge">Budget: {trip?.budgetModel || "individual"}</span>
+            <span className="badge">Mode: {trip.transport || "flights"}</span>
+            <span className="badge">Vibe: {trip.vibe || "adventure"}</span>
+            {!canEdit && <span className="badge border-red-200 bg-red-50 text-red-700">Read-only</span>}
+          </div>
         </section>
+      ) : null}
+
+      <section className="grid gap-6 md:grid-cols-2">
+        <TripMediaGallery
+          tripId={trip.id}
+          media={trip.media || []}
+          partyType={trip.partyType || "solo"}
+          onAddMedia={addTripMedia}
+        />
+        <div className="rounded-2xl border border-gray-100 bg-white p-5 shadow-md">
+          <TransportLinks
+            mode={trip.transport || "flights"}
+            origin={origin || "Origin"}
+            destination={destination || "Destination"}
+          />
+        </div>
+      </section>
+
+      <section className="grid gap-6 md:grid-cols-2">
+        <TripDocsTile
+          docs={trip.docs || []}
+          canEdit={canEdit}
+          onAdd={addDocMeta}
+          onRemove={removeDoc}
+          onUpdate={updateDoc}
+        />
+        <ExpenseTracker
+          mode={trip.partyType === "group" ? "group" : "solo"}
+          currency={trip.budget?.currency || "USD"}
+          estimatedBudget={trip.budget?.estimated ?? null}
+          expenses={trip.expenses || []}
+          participants={trip.participants || []}
+          currentUserId={currentUserId}
+          ownerId={trip.ownerId}
+          originCountry={trip.originCountry || null}
+          onSetEstimatedBudget={setEstimatedBudget}
+          onSetCurrency={setBudgetCurrency}
+          onSetOriginCountry={setOriginCountry}
+          onAddExpense={addExpense}
+          onRemoveExpense={removeExpense}
+        />
+      </section>
+
+      {trip.partyType === "group" && (
+        <section className="grid gap-6 md:grid-cols-2">
+          <ParticipantsPanel
+            participants={trip.participants || []}
+            onAdd={addParticipant}
+            onRemove={removeParticipant}
+          />
+          <div className="hidden md:block" />
+        </section>
+      )}
+
+      <section>
+        {!useWeekly ? (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
+            {activities.map((dayItems, i) => (
+              <ItineraryDay
+                key={i}
+                dayNumber={i + 1}
+                activities={dayItems}
+                onAdd={(text) => addActivity(i, text)}
+                onEdit={(idx, text) => editActivity(i, idx, text)}
+                onRemove={(idx) => removeActivity(i, idx)}
+                onMove={(fromIdx, toIdx) => moveActivity(i, fromIdx, toIdx)}
+              />
+            ))}
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {weeks.map((weekDays, w) => (
+              <WeekBlock
+                key={w}
+                weekIndex={w}
+                days={weekDays}
+                offset={w * 7}
+                onAdd={addActivity}
+                onEdit={editActivity}
+                onRemove={removeActivity}
+                onMove={moveActivity}
+              />
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-2xl border border-gray-100 bg-white p-5 shadow-md">
+        <h3 className="mb-2 text-base font-semibold">Trip Log (clears on sign-out)</h3>
+        {!trip.changeLog || trip.changeLog.length === 0 ? (
+          <p className="text-sm text-gray-500">No changes yet.</p>
+        ) : (
+          <ul className="space-y-2">
+            {trip.changeLog.map((e) => (
+              <li key={e.id} className="text-sm text-gray-700">
+                <span className="text-gray-500">{new Date(e.at).toLocaleString()} · </span>
+                <span className="font-medium">{e.by}:</span> {e.text}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <div className="mt-6 flex items-center gap-3">
+        <ExportPDFButton trip={trip} />
+      </div>
+
+      {!!canEdit && trip?.partyType !== "solo" && (
+        <ChatBox
+          me={currentUserId}
+          tripId={trip.id}
+          messages={trip.chat || []}
+          mediaIndex={trip.media || []}
+          onSend={handleChatSend}
+          docked
+          startOpen
+        />
+      )}
+    </div>
+  );
+}
+
+function WeekBlock({ weekIndex, days, offset, onAdd, onEdit, onRemove, onMove }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="rounded-2xl border border-gray-100 bg-white p-4 shadow-sm">
+      <div className="flex items-center justify-between">
+        <h4 className="text-sm font-semibold">Week {weekIndex + 1}</h4>
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className="rounded-lg border px-2 py-1 text-xs hover:bg-gray-50"
+        >
+          {open ? "Collapse" : "Expand"}
+        </button>
+      </div>
+      {open && (
+        <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
+          {days.map((dayItems, i) => {
+            const dayIdx = offset + i;
+            return (
+              <ItineraryDay
+                key={dayIdx}
+                dayNumber={dayIdx + 1}
+                activities={dayItems}
+                onAdd={(text) => onAdd(dayIdx, text)}
+                onEdit={(idx, text) => onEdit(dayIdx, idx, text)}
+                onRemove={(idx) => onRemove(dayIdx, idx)}
+                onMove={(fromIdx, toIdx) => onMove(dayIdx, fromIdx, toIdx)}
+              />
+            );
+          })}
+        </div>
       )}
     </div>
   );
