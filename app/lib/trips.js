@@ -12,12 +12,14 @@ import {
   setDoc,
   where,
   FieldPath,
+  updateDoc,
+  deleteField,
 } from "firebase/firestore";
 
 /** ---------- Firestore-safe helpers ---------- **/
 
 // Firestore disallows arrays directly inside arrays.
-// This normalizes any nested arrays by wrapping them as { items: [...] }.
+// Normalize nested arrays by wrapping them as { items: [...] } when needed.
 function normalizeForFirestore(value, insideArray = false) {
   if (Array.isArray(value)) {
     if (insideArray) {
@@ -63,8 +65,12 @@ export function templateToUiActivities(template) {
   return [];
 }
 
-/** ---------- Your existing API (same signatures) ---------- **/
+/** ---------- Trip CRUD & queries ---------- **/
 
+/**
+ * Create a new trip owned by `ownerUid`.
+ * Returns the new trip id.
+ */
 export async function createTrip(ownerUid, title = "Untitled Trip") {
   if (!ownerUid) throw new Error("createTrip: missing ownerUid");
 
@@ -81,6 +87,9 @@ export async function createTrip(ownerUid, title = "Untitled Trip") {
   return ref.id;
 }
 
+/**
+ * Rename a trip (owner or later editor constraints handled by rules).
+ */
 export async function renameTrip(tripId, title, userUid) {
   if (!tripId) throw new Error("renameTrip: missing tripId");
   if (!userUid) throw new Error("renameTrip: missing userUid");
@@ -93,6 +102,11 @@ export async function renameTrip(tripId, title, userUid) {
   );
 }
 
+/**
+ * List trips for a user:
+ *  - Owned by me
+ *  - Shared with me (participants.<uid> in ["viewer","editor"])
+ */
 export async function listMyTrips(userUid) {
   if (!userUid) return { owned: [], shared: [] };
 
@@ -105,7 +119,7 @@ export async function listMyTrips(userUid) {
   const ownedSnap = await getDocs(ownedQ);
   const owned = ownedSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
 
-  // Shared (may require a composite index first time)
+  // Shared (may need a composite index on first run)
   let shared = [];
   try {
     const sharedQ = query(
@@ -123,6 +137,9 @@ export async function listMyTrips(userUid) {
   return { owned, shared };
 }
 
+/**
+ * Archive/unarchive a trip (owner typically).
+ */
 export async function setTripArchived(tripId, archived, userUid) {
   if (!tripId) throw new Error("setTripArchived: missing tripId");
   if (!userUid) throw new Error("setTripArchived: missing userUid");
@@ -134,13 +151,19 @@ export async function setTripArchived(tripId, archived, userUid) {
   );
 }
 
+/**
+ * Write editable trip metadata to Firestore. Uses merge to create-or-update safely.
+ * `updates` can contain: title, origin, destination, startDate, endDate, transport, vibe,
+ * partyType, budgetModel, submitted, nights, budget, originCountry, etc.
+ * Security rules enforce who can update.
+ */
 export async function writeTripMeta(tripId, updates, userUid) {
   if (!tripId) throw new Error("writeTripMeta: missing tripId");
   if (!userUid) throw new Error("writeTripMeta: missing userUid");
 
   const ref = doc(db, "trips", tripId);
 
-  // Optional pre-check (helps during integration)
+  // Optional sanity read (helpful during integration)
   try {
     const snap = await getDoc(ref);
     if (!snap.exists()) {
@@ -167,9 +190,14 @@ export async function writeTripMeta(tripId, updates, userUid) {
     partyType: updates.partyType ?? null,
     budgetModel: updates.budgetModel ?? null,
     submitted: updates.submitted ?? false,
+
+    // Optional global budgeting fields if you use them:
     budget: updates.budget ?? null,
     originCountry: updates.originCountry ?? null,
-    nights: updates.nights ?? null, // keep for convenience
+
+    // Convenience
+    nights: updates.nights ?? null,
+
     updatedAt: serverTimestamp(),
   };
 
@@ -198,10 +226,57 @@ export async function setItineraryTemplate(tripId, ownerUid, activities) {
   );
 }
 
+/**
+ * Read trip meta from Firestore.
+ */
 export async function readTripMeta(tripId) {
   if (!tripId) throw new Error("readTripMeta: missing tripId");
   const ref = doc(db, "trips", tripId);
   const snap = await getDoc(ref);
   if (!snap.exists()) return null;
   return { id: snap.id, ...snap.data() };
+}
+
+/** ---------- Compatibility / Invites helpers ---------- **/
+
+// Alias for compatibility with older code (dev pages expect this)
+export async function getTrip(tripId) {
+  return readTripMeta(tripId);
+}
+
+/**
+ * Owner action: add or update a participant's role on a trip.
+ * Roles: "viewer" | "editor" (keep single owner).
+ *
+ * Security: current rules allow ONLY the owner to update the trip doc,
+ * so calling this as a non-owner will be rejected by Firestore rules.
+ */
+export async function addParticipantToTrip(tripId, targetUid, role = "viewer", actingUid) {
+  if (!tripId) throw new Error("addParticipantToTrip: missing tripId");
+  if (!targetUid) throw new Error("addParticipantToTrip: missing targetUid");
+  if (!actingUid) throw new Error("addParticipantToTrip: missing actingUid");
+
+  const safeRole = role === "editor" ? "editor" : "viewer";
+  const ref = doc(db, "trips", tripId);
+
+  // Dot-path update so we don't clobber the whole participants map
+  await updateDoc(ref, {
+    [`participants.${targetUid}`]: safeRole,
+    updatedAt: serverTimestamp(),
+  });
+}
+
+/**
+ * Remove a participant from a trip (owner action).
+ */
+export async function removeParticipantFromTrip(tripId, targetUid, actingUid) {
+  if (!tripId) throw new Error("removeParticipantFromTrip: missing tripId");
+  if (!targetUid) throw new Error("removeParticipantFromTrip: missing targetUid");
+  if (!actingUid) throw new Error("removeParticipantFromTrip: missing actingUid");
+
+  const ref = doc(db, "trips", tripId);
+  await updateDoc(ref, {
+    [`participants.${targetUid}`]: deleteField(),
+    updatedAt: serverTimestamp(),
+  });
 }

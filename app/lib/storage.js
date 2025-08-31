@@ -1,17 +1,10 @@
 // app/lib/storage.js
-const DRAFT_KEY = "tripweave:draft";
 const TRIP_KEY = (id) => `tripweave:trip:${id}`;
 
-export function saveDraft(draft) {
-  if (typeof window === "undefined") return;
-  try { localStorage.setItem(DRAFT_KEY, JSON.stringify(draft)); } catch {}
-}
-
-export function loadDraft() {
-  if (typeof window === "undefined") return null;
-  try { return JSON.parse(localStorage.getItem(DRAFT_KEY) || "null"); } catch { return null; }
-}
-
+/**
+ * Persist a local mirror of a trip (for faster UI / offline feel).
+ * This is NOT a draft system; server is the source of truth.
+ */
 export function saveTrip(id, data) {
   if (typeof window === "undefined") return;
   try { localStorage.setItem(TRIP_KEY(id), JSON.stringify(data)); } catch {}
@@ -22,7 +15,7 @@ export function loadTrip(id) {
   try { return JSON.parse(localStorage.getItem(TRIP_KEY(id)) || "null"); } catch { return null; }
 }
 
-export function clearDraft() {
+export function clearTrip(id) {
   if (typeof window === "undefined") return;
-  try { localStorage.removeItem(DRAFT_KEY); } catch {}
+  try { localStorage.removeItem(TRIP_KEY(id)); } catch {}
 }

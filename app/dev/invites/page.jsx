@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { auth, db } from "../../lib/firebaseClient";
 import { onAuthStateChanged } from "firebase/auth";
 import { doc, getDoc } from "firebase/firestore";
@@ -9,15 +9,24 @@ import {
   acceptInvite, declineInvite
 } from "../../lib/invites";
 
+const dedupeById = (arr = []) => {
+  const map = new Map();
+  for (const t of arr) if (t?.id && !map.has(t.id)) map.set(t.id, t);
+  return [...map.values()];
+};
+
 export default function InvitesDev() {
   const [user, setUser] = useState(null);
   const [myUserId, setMyUserId] = useState("");
+
   const [trips, setTrips] = useState([]);
   const [selectedTrip, setSelectedTrip] = useState("");
+
   const [toUserId, setToUserId] = useState("");
   const [outgoing, setOutgoing] = useState([]);
   const [incoming, setIncoming] = useState([]);
   const [alreadyInTrip, setAlreadyInTrip] = useState(new Set()); // keys: `${tripId}:${uid}`
+
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -37,11 +46,14 @@ export default function InvitesDev() {
         setMyUserId(snap.exists() ? (snap.data().userId || "") : "");
       } catch (e) { setErr(String(e?.message || e)); }
 
-      // my trips
+      // my trips → flatten + de-dupe
       try {
-        const mine = await listMyTrips(u.uid);
-        setTrips(mine);
-        if (mine.length) setSelectedTrip(mine[0].id);
+        const { owned = [], shared = [] } = await listMyTrips(u.uid);
+        const allUnique = dedupeById([...owned, ...shared]);
+        setTrips(allUnique);
+        if (allUnique.length) {
+          setSelectedTrip(prev => allUnique.find(t => t.id === prev)?.id || allUnique[0].id);
+        }
       } catch (e) { setErr(String(e?.message || e)); }
 
       // outgoing now
@@ -59,8 +71,8 @@ export default function InvitesDev() {
             listOutgoingInvites(user.uid),
             listIncomingInvites(myUserId),
           ]);
-          setOutgoing(out);
-          setIncoming(inc);
+          setOutgoing(out || []);
+          setIncoming(inc || []);
         } catch {}
       })();
     }
@@ -69,7 +81,7 @@ export default function InvitesDev() {
   // Build a set of (tripId, toUid) that already exist in participants, to hide "Add to trip"
   useEffect(() => {
     (async () => {
-      const accepted = outgoing.filter(i => i.status === "accepted" && i.toUid);
+      const accepted = (outgoing || []).filter(i => i.status === "accepted" && i.toUid);
       const uniqueTripIds = [...new Set(accepted.map(i => i.tripId))];
       const newSet = new Set();
       for (const tid of uniqueTripIds) {
@@ -91,18 +103,19 @@ export default function InvitesDev() {
     try {
       const [out, inc] = await Promise.all([
         listOutgoingInvites(user.uid),
-        listIncomingInvites(myUserId),
+        myUserId ? listIncomingInvites(myUserId) : Promise.resolve([]),
       ]);
-      setOutgoing(out); setIncoming(inc);
+      setOutgoing(out || []); setIncoming(inc || []);
     } catch (e) { setErr(String(e?.message || e)); }
   };
 
   const sendInvite = async () => {
     if (!user) return;
     if (!selectedTrip) { setErr("Pick a trip first"); return; }
+    if (!toUserId.trim()) { setErr("Enter a recipient short userId"); return; }
     setBusy(true); setErr("");
     try {
-      await createInvite(user.uid, toUserId, selectedTrip);
+      await createInvite(user.uid, toUserId.trim(), selectedTrip);
       setToUserId("");
       await refreshInvites();
     } catch (e) { setErr(String(e?.message || e)); }
@@ -118,17 +131,14 @@ export default function InvitesDev() {
     catch (e) { alert(e?.message || String(e)); }
   };
 
+  // addParticipantToTrip(tripId, targetUid, role, actingUid)
   const addToTrip = async (invite) => {
     if (!user) return;
     const key = `${invite.tripId}:${invite.toUid}`;
-    // Guard: if already present, bail quietly
-    if (alreadyInTrip.has(key)) {
-      alert("They’re already a participant on this trip.");
-      return;
-    }
+    if (!invite.toUid) { alert("Recipient uid missing; they must Accept first."); return; }
+    if (alreadyInTrip.has(key)) { alert("They’re already a participant on this trip."); return; }
     try {
-      await addParticipantToTrip(invite.tripId, user.uid, invite.toUid, "editor");
-      // mark in local state so the button hides immediately
+      await addParticipantToTrip(invite.tripId, invite.toUid, "viewer", user.uid);
       const next = new Set(alreadyInTrip);
       next.add(key);
       setAlreadyInTrip(next);
@@ -157,7 +167,11 @@ export default function InvitesDev() {
           style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #ccc" }}
         >
           <option value="" disabled>Choose a trip…</option>
-          {trips.map(t => <option key={t.id} value={t.id}>{t.title}</option>)}
+          {trips.map((t, i) => (
+            <option key={`${t.id}-${i}`} value={t.id}>
+              {t.title || "(Untitled)"} — {t.id}
+            </option>
+          ))}
         </select>
 
         <input

@@ -3,10 +3,33 @@
 
 import { useRouter } from "next/navigation";
 import { useAuth } from "../context/AuthProvider";
+import { useEffect, useState } from "react";
+import { db } from "../lib/firebaseClient";
+import { doc, getDoc } from "firebase/firestore";
 
 export default function UserMenu() {
   const router = useRouter();
   const { user, loading, signInWithGoogle, signOut } = useAuth();
+  const [shortId, setShortId] = useState("");
+
+  useEffect(() => {
+    async function fetchUserId() {
+      if (!user) {
+        setShortId("");
+        return;
+      }
+      try {
+        const ref = doc(db, "users", user.uid);
+        const snap = await getDoc(ref);
+        if (snap.exists()) {
+          setShortId(snap.data().userId || "");
+        }
+      } catch (e) {
+        console.warn("Failed to fetch short userId:", e);
+      }
+    }
+    fetchUserId();
+  }, [user]);
 
   const handleSignIn = async () => {
     try {
@@ -23,13 +46,11 @@ export default function UserMenu() {
     } catch (e) {
       console.error("Sign-out failed:", e);
     } finally {
-      // Hard redirect to ensure clean state
       window.location.href = "/";
     }
   };
 
   const goToDashboard = () => {
-    // Only allow if signed in
     if (user) router.push("/dashboard");
   };
 
@@ -74,6 +95,11 @@ export default function UserMenu() {
         <span className="hidden sm:inline text-sm text-gray-700 group-hover:text-gray-900">
           {name}
         </span>
+        {shortId && (
+          <span className="ml-2 text-xs rounded bg-gray-100 px-2 py-0.5 font-mono text-gray-600">
+            {shortId}
+          </span>
+        )}
       </button>
 
       <button
