@@ -1,11 +1,9 @@
-// app/trip/new/page.js
 "use client";
 
 import { Suspense, useEffect } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { useAuth } from "../../context/AuthProvider";
-import { createTrip } from "../../lib/trips";
-import { saveTrip } from "../../lib/storage";
+import { createTrip, writeTripMeta } from "../../lib/trips";
 
 function NewTripInner() {
   const router = useRouter();
@@ -13,51 +11,42 @@ function NewTripInner() {
   const { user, loading } = useAuth();
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      // Require auth to create a real Firestore trip
-      if (loading) return;
-      if (!user) {
+    async function go() {
+      if (loading) return;                          // wait for auth
+      if (!user) {                                  // must be signed in
         router.replace("/dev/firestore-check");
         return;
       }
 
       const destination = (params.get("destination") || "").trim();
 
-      try {
-        // Create a real trip owned by this user
-        const newId = await createTrip(user.uid, "Untitled Trip");
+      // 1) create the trip owned by me
+      const tripId = await createTrip(user.uid, "Untitled Trip");
 
-        if (cancelled) return;
-
-        // Optional local mirror so the next page has instant UI
-        const shell = {
-          id: newId,
-          title: "Untitled Trip",
-          ownerUid: user.uid,
-          participants: { [user.uid]: "owner" },
-          origin: "",
+      // 2) immediately stamp destination (and any other defaults you want)
+      await writeTripMeta(
+        tripId,
+        {
           destination,
-          nights: 4,
+          origin: "",
           transport: "flights",
           vibe: "adventure",
-          activities: [], // Trip page will seed/normalize
           partyType: "solo",
           budgetModel: "individual",
-          lastUserId: user.email || user.uid,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        };
-        saveTrip(newId, shell);
+          submitted: false,
+        },
+        user.uid
+      );
 
-        // Redirect to the real trip route
-        router.replace(`/trip/${newId}`);
-      } catch (e) {
-        console.error("Failed to create trip:", e);
-        router.replace("/"); // fallback
-      }
-    })();
-    return () => { cancelled = true; };
+      // 3) go to the trip
+      router.replace(`/trip/${tripId}`);
+    }
+
+    go().catch((e) => {
+      console.error("Failed to create trip:", e);
+      alert("Could not create trip. Please try again.");
+      router.replace("/");
+    });
   }, [params, router, user, loading]);
 
   return (

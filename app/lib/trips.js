@@ -14,6 +14,7 @@ import {
   FieldPath,
   updateDoc,
   deleteField,
+  arrayUnion,
 } from "firebase/firestore";
 
 /** ---------- Firestore-safe helpers ---------- **/
@@ -79,6 +80,7 @@ export async function createTrip(ownerUid, title = "Untitled Trip") {
     ownerUid,
     archived: false,
     participants: { [ownerUid]: "owner" }, // map of uid -> role
+    participantsArr: [ownerUid],           // array for dashboard queries
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   };
@@ -262,6 +264,7 @@ export async function addParticipantToTrip(tripId, targetUid, role = "viewer", a
   // Dot-path update so we don't clobber the whole participants map
   await updateDoc(ref, {
     [`participants.${targetUid}`]: safeRole,
+    participantsArr: arrayUnion(targetUid),
     updatedAt: serverTimestamp(),
   });
 }

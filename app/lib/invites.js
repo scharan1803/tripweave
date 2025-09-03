@@ -1,18 +1,24 @@
 // app/lib/invites.js
 import { db } from "./firebaseClient";
 import {
-  addDoc, collection, serverTimestamp,
-  query, where, orderBy, getDocs,
-  doc, updateDoc
+  collection, doc, getDoc, getDocs, query, where, orderBy,
+  setDoc, updateDoc, serverTimestamp
 } from "firebase/firestore";
 
-// Create an invite (pending) to someone’s short userId for a given trip
+// Deterministic doc id so rules can reference it:
+// tripInvites/{tripId}__{toUserId}
+function inviteDocId(tripId, toUserId) {
+  return `${tripId}__${toUserId.trim()}`;
+}
+
+// Create invite (pending)
 export async function createInvite(fromUid, toUserId, tripId) {
   if (!fromUid) throw new Error("Missing fromUid");
   if (!toUserId || !toUserId.trim()) throw new Error("toUserId is required");
   if (!tripId) throw new Error("Missing tripId");
 
-  await addDoc(collection(db, "tripInvites"), {
+  const ref = doc(db, "tripInvites", inviteDocId(tripId, toUserId));
+  await setDoc(ref, {
     fromUid,
     toUserId: toUserId.trim(),
     tripId,
@@ -45,14 +51,36 @@ export async function listIncomingInvites(myUserId) {
   return snap.docs.map(d => ({ id: d.id, ...d.data() }));
 }
 
-// Recipient actions
-export async function acceptInvite(inviteId, myUid) {
-  const ref = doc(db, "tripInvites", inviteId);
-  // Stamp both status and toUid (rules allow recipient to set toUid == their uid)
-  await updateDoc(ref, { status: "accepted", toUid: myUid, respondedAt: serverTimestamp() });
+// Accept + self-join
+export async function acceptInviteAndJoin(inviteIdOrComposite, myUid) {
+  if (!inviteIdOrComposite) throw new Error("Missing invite id");
+  if (!myUid) throw new Error("Missing myUid");
+
+  const inviteRef = doc(db, "tripInvites", inviteIdOrComposite);
+  const snap = await getDoc(inviteRef);
+  if (!snap.exists()) throw new Error("Invite not found");
+
+  const data = snap.data();
+  const tripId = data.tripId;
+
+  // 1) mark accepted
+  await updateDoc(inviteRef, {
+    status: "accepted",
+    toUid: myUid,
+    respondedAt: serverTimestamp(),
+  });
+
+  // 2) self-join the trip (rules permit with accepted invite)
+  const tripRef = doc(db, "trips", tripId);
+  await updateDoc(tripRef, {
+    [`participants.${myUid}`]: "viewer",
+    updatedAt: serverTimestamp(),
+  });
+
+  return { tripId };
 }
 
-export async function declineInvite(inviteId) {
-  const ref = doc(db, "tripInvites", inviteId);
+export async function declineInvite(inviteIdOrComposite) {
+  const ref = doc(db, "tripInvites", inviteIdOrComposite);
   await updateDoc(ref, { status: "declined", respondedAt: serverTimestamp() });
 }

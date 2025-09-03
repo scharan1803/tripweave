@@ -2,17 +2,19 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Bell } from "lucide-react";
 import { useAuth } from "../context/AuthProvider";
-import { acceptInvite, declineInvite } from "../lib/invites";
+import { acceptInviteAndJoin, declineInvite } from "../lib/invites";
 import { useInviteNotifications } from "../hooks/useInviteNotifications";
 
 export default function NotificationsBell() {
   const { user, profile, loading } = useAuth();
+  const router = useRouter();
   const [open, setOpen] = useState(false);
 
   const meUid = user?.uid || "";
-  const myUserId = profile?.userId || ""; // short userId from /users/{uid}
+  const myUserId = profile?.userId || "";
   const enabled = !!(meUid && myUserId);
 
   const { incoming, outgoing } = useInviteNotifications({
@@ -26,9 +28,6 @@ export default function NotificationsBell() {
     [incoming]
   );
 
-  const shellClass = "relative inline-flex w-[38px] justify-center";
-
-  // click-away to close panel
   useEffect(() => {
     if (!open) return;
     const onClick = (e) => {
@@ -39,43 +38,25 @@ export default function NotificationsBell() {
     return () => document.removeEventListener("mousedown", onClick);
   }, [open]);
 
-  // Keep header layout stable during auth/profile load
-  if (loading) return <span className={shellClass} aria-hidden />;
-
-  // Not signed in → render reserved width, no listeners
-  if (!user) return <span className={shellClass} aria-hidden />;
-
-  // Signed in but profile.userId not ready yet → placeholder (no queries)
-  if (!enabled) {
-    return (
-      <span className={shellClass} aria-hidden>
-        <Bell className="h-5 w-5 text-gray-300" />
-      </span>
-    );
-  }
+  if (loading) return <span className="relative inline-flex w-[38px] justify-center" aria-hidden />;
+  if (!user) return <span className="relative inline-flex w-[38px] justify-center" aria-hidden />;
 
   return (
     <div className="relative">
       <button
-        className={`${shellClass} items-center`}
+        className="relative inline-flex w-[38px] items-center justify-center"
         aria-label="Notifications"
         title="Notifications"
         onClick={() => setOpen((v) => !v)}
       >
         <Bell className="h-5 w-5 text-gray-700" />
-        <span
-          className="absolute -right-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-red-600 px-1 text-[10px] font-bold text-white"
-          aria-live="polite"
-        >
+        <span className="absolute -right-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-red-600 px-1 text-[10px] font-bold text-white">
           {pendingIncoming}
         </span>
       </button>
 
       {open && (
-        <div
-          id="tw-invite-panel"
-          className="absolute right-0 z-50 mt-2 w-[360px] rounded-xl border border-gray-200 bg-white p-3 shadow-lg"
-        >
+        <div id="tw-invite-panel" className="absolute right-0 z-50 mt-2 w-[360px] rounded-xl border border-gray-200 bg-white p-3 shadow-lg">
           <div className="text-sm font-semibold">Incoming invites</div>
           <ul className="mt-2 space-y-2">
             {incoming.length === 0 ? (
@@ -95,7 +76,8 @@ export default function NotificationsBell() {
                       <button
                         onClick={async () => {
                           try {
-                            await acceptInvite(i.id, meUid);
+                            const { tripId } = await acceptInviteAndJoin(i.id, meUid);
+                            router.push(`/trip/${tripId}`);
                           } catch (e) {
                             alert(e?.message || "Accept failed");
                           }

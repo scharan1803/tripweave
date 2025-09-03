@@ -1,11 +1,10 @@
 // app/trip/[id]/page.js
-import TripClient from "./TripClientCore";
+import TripClient from "./TripClient";
 import { redirect } from "next/navigation";
 
 export default function TripPage({ params }) {
-  const { id } = params; // App Router: params is sync
+  const { id } = params;
   if (typeof id === "string" && id.startsWith("draft-")) {
-    // If any legacy code still links to draft-*, bounce to /trip/new
     redirect("/trip/new");
   }
   return (
