@@ -1,24 +1,28 @@
 // app/lib/invites.js
 import { db } from "./firebaseClient";
 import {
-  collection, doc, getDoc, getDocs, query, where, orderBy,
-  setDoc, updateDoc, serverTimestamp
+  addDoc,
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  orderBy,
+  query,
+  serverTimestamp,
+  updateDoc,
+  where,
 } from "firebase/firestore";
 
-// Deterministic doc id so rules can reference it:
-// tripInvites/{tripId}__{toUserId}
-function inviteDocId(tripId, toUserId) {
-  return `${tripId}__${toUserId.trim()}`;
-}
-
-// Create invite (pending)
+/**
+ * Create an invite (pending) to someone’s short userId for a given trip.
+ * Sender must be the owner (enforced by UI and rules).
+ */
 export async function createInvite(fromUid, toUserId, tripId) {
-  if (!fromUid) throw new Error("Missing fromUid");
-  if (!toUserId || !toUserId.trim()) throw new Error("toUserId is required");
-  if (!tripId) throw new Error("Missing tripId");
+  if (!fromUid) throw new Error("createInvite: missing fromUid");
+  if (!toUserId || !toUserId.trim()) throw new Error("createInvite: toUserId required");
+  if (!tripId) throw new Error("createInvite: missing tripId");
 
-  const ref = doc(db, "tripInvites", inviteDocId(tripId, toUserId));
-  await setDoc(ref, {
+  await addDoc(collection(db, "tripInvites"), {
     fromUid,
     toUserId: toUserId.trim(),
     tripId,
@@ -27,41 +31,24 @@ export async function createInvite(fromUid, toUserId, tripId) {
   });
 }
 
-// Outgoing invites I sent
-export async function listOutgoingInvites(uid) {
-  if (!uid) return [];
-  const q = query(
-    collection(db, "tripInvites"),
-    where("fromUid", "==", uid),
-    orderBy("createdAt", "desc")
-  );
-  const snap = await getDocs(q);
-  return snap.docs.map(d => ({ id: d.id, ...d.data() }));
-}
+/**
+ * Accept and join the trip:
+ * - marks invite accepted (+toUid)
+ * - adds me as viewer in participants
+ *
+ * Note: Rules allow a non-owner to only add their own participants.{uid}
+ * (plus optional updatedAt). We keep the update minimal to satisfy rules.
+ */
+export async function acceptInviteAndJoin(inviteId, myUid) {
+  if (!inviteId) throw new Error("acceptInviteAndJoin: missing inviteId");
+  if (!myUid) throw new Error("acceptInviteAndJoin: missing myUid");
 
-// Incoming invites addressed to my short userId
-export async function listIncomingInvites(myUserId) {
-  if (!myUserId) return [];
-  const q = query(
-    collection(db, "tripInvites"),
-    where("toUserId", "==", myUserId),
-    orderBy("createdAt", "desc")
-  );
-  const snap = await getDocs(q);
-  return snap.docs.map(d => ({ id: d.id, ...d.data() }));
-}
-
-// Accept + self-join
-export async function acceptInviteAndJoin(inviteIdOrComposite, myUid) {
-  if (!inviteIdOrComposite) throw new Error("Missing invite id");
-  if (!myUid) throw new Error("Missing myUid");
-
-  const inviteRef = doc(db, "tripInvites", inviteIdOrComposite);
-  const snap = await getDoc(inviteRef);
-  if (!snap.exists()) throw new Error("Invite not found");
-
-  const data = snap.data();
-  const tripId = data.tripId;
+  const inviteRef = doc(db, "tripInvites", inviteId);
+  const inviteSnap = await getDoc(inviteRef);
+  if (!inviteSnap.exists()) throw new Error("Invite not found.");
+  const invite = inviteSnap.data();
+  const tripId = invite.tripId;
+  if (!tripId) throw new Error("Invite has no tripId.");
 
   // 1) mark accepted
   await updateDoc(inviteRef, {
@@ -70,7 +57,7 @@ export async function acceptInviteAndJoin(inviteIdOrComposite, myUid) {
     respondedAt: serverTimestamp(),
   });
 
-  // 2) self-join the trip (rules permit with accepted invite)
+  // 2) join trip — only what's allowed by rules for non-owners
   const tripRef = doc(db, "trips", tripId);
   await updateDoc(tripRef, {
     [`participants.${myUid}`]: "viewer",
@@ -80,7 +67,33 @@ export async function acceptInviteAndJoin(inviteIdOrComposite, myUid) {
   return { tripId };
 }
 
-export async function declineInvite(inviteIdOrComposite) {
-  const ref = doc(db, "tripInvites", inviteIdOrComposite);
+/** Decline (no trip touch) */
+export async function declineInvite(inviteId) {
+  if (!inviteId) throw new Error("declineInvite: missing inviteId");
+  const ref = doc(db, "tripInvites", inviteId);
   await updateDoc(ref, { status: "declined", respondedAt: serverTimestamp() });
+}
+
+/** Outgoing I sent */
+export async function listOutgoingInvites(uid) {
+  if (!uid) return [];
+  const q = query(
+    collection(db, "tripInvites"),
+    where("fromUid", "==", uid),
+    orderBy("createdAt", "desc")
+  );
+  const snap = await getDocs(q);
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+}
+
+/** Incoming to my short userId */
+export async function listIncomingInvites(myUserId) {
+  if (!myUserId) return [];
+  const q = query(
+    collection(db, "tripInvites"),
+    where("toUserId", "==", myUserId),
+    orderBy("createdAt", "desc")
+  );
+  const snap = await getDocs(q);
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 }

@@ -1,6 +1,7 @@
+// app/components/TripMediaGallery.jsx
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getMediaURL } from "../lib/mediaStore";
 
 export default function TripMediaGallery({
@@ -10,6 +11,7 @@ export default function TripMediaGallery({
   onAddMedia,             // async (files: FileList|File[]) => Promise<void>
 }) {
   const [urls, setUrls] = useState({}); // { [id]: objectURL }
+  const inputRef = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -37,12 +39,15 @@ export default function TripMediaGallery({
   }, [tripId, media.length]);
 
   async function handlePick(e) {
-    const files = e.target.files;
+    // React SyntheticEvent is pooled; grab the element before any await.
+    const inputEl = e.currentTarget || inputRef.current;
+    const files = inputEl?.files;
     if (!files || files.length === 0) return;
     try {
       await onAddMedia?.(files);
     } finally {
-      e.currentTarget.value = "";
+      // Reset AFTER await using the ref/element we captured.
+      if (inputEl) inputEl.value = "";
     }
   }
 
@@ -55,6 +60,7 @@ export default function TripMediaGallery({
         {canDirectUpload && (
           <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-gray-900 px-3 py-2 text-sm font-semibold text-white hover:bg-black">
             <input
+              ref={inputRef}
               type="file"
               accept="image/*,video/*,audio/*"
               multiple
