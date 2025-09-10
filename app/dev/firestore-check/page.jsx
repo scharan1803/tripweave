@@ -1,3 +1,4 @@
+//app/dev/firestore-check/page.jsx
 'use client';
 import { useEffect, useState } from "react";
 import { auth, db, googleProvider } from "../../lib/firebaseClient";

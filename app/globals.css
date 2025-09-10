@@ -5,54 +5,47 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ---------- Base resets & typography tweaks ---------- */
+/* ---------- Base resets & typography ---------- */
 @layer base {
   html, body {
-    @apply h-full bg-gray-50 text-gray-900 antialiased;
+    @apply h-full font-sans text-gray-900 antialiased;
   }
 
-  /* Smooth focus ring defaults */
+  /* Smooth focus styles */
   :focus-visible {
-    @apply outline-none ring-2 ring-gray-300;
+    @apply outline-none ring-2 ring-black/10;
   }
 
-  /* Make native dialogs & modals (if any) look consistent */
+  /* Native dialog baseline */
   dialog {
-    @apply rounded-xl border border-gray-200 p-0;
+    @apply rounded-xl border border-black/10 p-0;
   }
 
-  /* Improve form controls baseline */
+  /* Form control base size */
   input, select, textarea, button {
     @apply text-[15px];
   }
 
-  /* Optional: nicer scrollbars (WebKit) */
-  *::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
-  }
-  *::-webkit-scrollbar-thumb {
-    @apply bg-gray-300 rounded-full;
-  }
-  *::-webkit-scrollbar-track {
-    @apply bg-gray-100;
-  }
+  /* Optional: simple scrollbars (WebKit) */
+  *::-webkit-scrollbar { width: 10px; height: 10px; }
+  *::-webkit-scrollbar-thumb { @apply bg-black/10 rounded-full; }
+  *::-webkit-scrollbar-track { @apply bg-black/5; }
 }
 
-/* ---------- Component library (TripWeave atoms) ---------- */
+/* ---------- Glassy component tokens ---------- */
 @layer components {
   /* Buttons */
   .btn {
-    @apply inline-flex items-center justify-center rounded-lg px-3 py-2 text-sm font-semibold transition;
+    @apply inline-flex items-center justify-center rounded-full px-4 py-2 text-sm font-semibold transition;
   }
   .btn-primary {
-    @apply btn bg-gray-900 text-white hover:bg-black disabled:cursor-not-allowed disabled:bg-gray-300;
+    @apply btn bg-black text-white shadow-lg hover:bg-neutral-900 disabled:cursor-not-allowed disabled:bg-neutral-300;
   }
   .btn-outline {
-    @apply btn border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-60;
+    @apply btn border border-black/10 bg-white/80 hover:bg-white;
   }
   .btn-ghost {
-    @apply btn text-gray-700 hover:bg-gray-100;
+    @apply btn text-gray-800 hover:bg-black/5;
   }
   .btn-danger {
     @apply btn bg-red-600 text-white hover:bg-red-700 disabled:opacity-60;
@@ -60,18 +53,18 @@
 
   /* Inputs & selects */
   .input {
-    @apply w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:border-gray-900;
+    @apply w-full rounded-2xl border border-white/60 bg-white/70 px-3 py-2 text-sm shadow-inner outline-none focus:border-black;
   }
   .select {
-    @apply rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:border-gray-900 bg-white;
+    @apply rounded-2xl border border-white/60 bg-white/70 px-3 py-2 text-sm shadow-inner outline-none focus:border-black;
   }
   .textarea {
-    @apply w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:border-gray-900;
+    @apply w-full rounded-2xl border border-white/60 bg-white/70 px-3 py-2 text-sm shadow-inner outline-none focus:border-black;
   }
 
   /* Pills/badges */
   .badge {
-    @apply inline-flex items-center gap-1 rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-xs font-medium text-gray-700;
+    @apply inline-flex items-center gap-1 rounded-full border border-white/60 bg-white/70 px-2.5 py-1 text-xs font-medium text-gray-700 backdrop-blur;
   }
   .badge-info {
     @apply badge border-blue-200 bg-blue-50 text-blue-700;
@@ -83,54 +76,51 @@
     @apply badge border-red-200 bg-red-50 text-red-700;
   }
 
-  /* Cards, dividers, empty states */
+  /* Cards & shells */
   .card {
-    @apply rounded-2xl border border-gray-100 bg-white p-5 shadow-md;
+    @apply rounded-3xl border border-white/50 bg-white/70 p-5 shadow-xl backdrop-blur-xl;
   }
   .divider {
-    @apply my-4 h-px w-full bg-gray-200;
+    @apply my-4 h-px w-full bg-black/10;
   }
   .empty-state {
-    @apply rounded-lg border border-dashed border-gray-300 p-4 text-center text-sm text-gray-500;
+    @apply rounded-2xl border border-dashed border-black/10 p-4 text-center text-sm text-gray-500;
   }
-
-  /* Small utility shells */
   .icon-button {
-    @apply inline-grid h-8 w-8 place-items-center rounded-lg border border-gray-300 bg-white text-gray-700 hover:bg-gray-50;
+    @apply inline-grid h-9 w-9 place-items-center rounded-2xl border border-white/60 bg-white/80 text-gray-800 hover:bg-white;
   }
 
-  /* Weather badge (used in day tiles’ top-right meta) */
+  /* Small utility badges */
   .weather-badge {
-    @apply inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white/80 px-2 py-0.5 text-xs text-gray-700 backdrop-blur;
+    @apply inline-flex items-center gap-1 rounded-full border border-white/60 bg-white/80 px-2 py-0.5 text-xs text-gray-700 backdrop-blur;
   }
 
-  /* Compact helper text */
+  /* Helper text */
   .hint {
     @apply mt-1 text-xs text-gray-500;
   }
 }
 
-/* --- Non-intrusive full-page background image --- */
+/* ---------- Subtle full-page poster background ---------- */
 html, body { height: 100%; }
-
-/* Ensure body background is transparent so the poster shows */
+/* Keep body transparent so the poster shows through glass UI */
 body { background-color: transparent !important; }
 
 body::before {
   content: "";
   position: fixed;
   inset: 0;
-  z-index: -1;                /* sits behind everything */
-  background-image: url("/media/hero-poster.jpg");
+  z-index: -1;
+  background-image: url("/media/hero-poster.jpg"); /* replace if needed */
   background-size: cover;
   background-position: center;
   background-repeat: no-repeat;
-  /* optional readability overlay; lower the alpha if too dark */
-  box-shadow: inset 0 0 0 100vmax rgba(0,0,0,0.25);
-  pointer-events: none;       /* never block clicks */
-}  /* <-- THIS was missing */
+  /* lighter overlay so glass components pop */
+  box-shadow: inset 0 0 0 100vmax rgba(0,0,0,0.12);
+  pointer-events: none;
+}
 
-/* ---------- Utility helpers (optional) ---------- */
+/* ---------- Utilities ---------- */
 @layer utilities {
   .no-select {
     -webkit-user-select: none;
@@ -156,10 +146,3 @@ body::before {
     overflow: hidden;
   }
 }
-
-/* ---------- App-specific small touch-ups ---------- */
-
-/* Keep the header backdrop slightly translucent on scroll (already applied in JSX) */
-/* .header-blur { @apply bg-white/90 backdrop-blur; } */
-
-/* Inputs that have a trailing clear (×) button can use relative containers; no extra CSS needed */

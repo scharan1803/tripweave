@@ -1,3 +1,4 @@
+//app/lib/users.js
 import { db } from "./firebaseClient";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 
