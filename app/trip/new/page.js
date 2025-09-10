@@ -1,3 +1,5 @@
+
+//app/trip/new/page.js
 "use client";
 
 import { Suspense, useEffect } from "react";

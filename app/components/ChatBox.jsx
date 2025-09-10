@@ -1,3 +1,4 @@
+//app/components/ChatBox.jsx
 "use client";
 
 import { useEffect, useRef, useState } from "react";

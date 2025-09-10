@@ -1,4 +1,3 @@
-// app/components/TripMetaEditor.jsx
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -9,7 +8,7 @@ const PARTY = ["solo", "group"];
 
 const GMAPS_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || "";
 
-// Places API (New) – minimal, no legacy fields
+// Places API (New)
 async function fetchAutocompleteNew(input) {
   if (!GMAPS_KEY || !input?.trim()) return [];
   const body = JSON.stringify({ input: input.trim() });
@@ -29,7 +28,6 @@ async function fetchAutocompleteNew(input) {
         body,
       });
       if (!res.ok) {
-        // eslint-disable-next-line no-console
         console.warn("[Places New] upstream", res.status, await res.text().catch(() => ""));
         continue;
       }
@@ -107,7 +105,7 @@ async function reverseGeocodeToLocality(lat, lng) {
 
 export default function TripMetaEditor({ trip, onSubmit }) {
   const [local, setLocal] = useState(() => ({
-    name: trip?.name || "Untitled Trip",
+    title: trip?.title || "Untitled Trip",
     origin: trip?.origin || "",
     originCoords: trip?.originCoords || null,
     destination: trip?.destination || "",
@@ -123,7 +121,7 @@ export default function TripMetaEditor({ trip, onSubmit }) {
   // Sync from parent
   useEffect(() => {
     setLocal({
-      name: trip?.name || "Untitled Trip",
+      title: trip?.title || "Untitled Trip",
       origin: trip?.origin || "",
       originCoords: trip?.originCoords || null,
       destination: trip?.destination || "",
@@ -136,7 +134,7 @@ export default function TripMetaEditor({ trip, onSubmit }) {
     });
   }, [trip]);
 
-  // ---- Autocomplete state (with proper collapsing) ----
+  // ---- Autocomplete state ----
   const [originPreds, setOriginPreds] = useState([]);
   const [destPreds, setDestPreds] = useState([]);
   const [openOrigin, setOpenOrigin] = useState(false);
@@ -246,7 +244,7 @@ export default function TripMetaEditor({ trip, onSubmit }) {
     }
   }
 
-  // ---- Dates: restore validation (today min, end >= start) ----
+  // ---- Dates: restore validation ----
   const todayISO = useMemo(() => {
     const d = new Date();
     const pad = (n) => String(n).padStart(2, "0");
@@ -268,10 +266,10 @@ export default function TripMetaEditor({ trip, onSubmit }) {
 
   const isValid = local.destination.trim().length > 0 && datesValid;
 
-  // Dirty check (so Update greys out unless changed)
+  // Dirty check
   const dirty = useMemo(() => {
     return (
-      (local.name || "Untitled Trip") !== (trip?.name || "Untitled Trip") ||
+      (local.title || "Untitled Trip") !== (trip?.title || "Untitled Trip") ||
       (local.origin || "") !== (trip?.origin || "") ||
       (local.destination || "") !== (trip?.destination || "") ||
       (local.startDate || "") !== (trip?.startDate || "") ||
@@ -286,7 +284,7 @@ export default function TripMetaEditor({ trip, onSubmit }) {
     if (!isValid || submitting) return;
     setSubmitting(true);
     const updates = {
-      name: (local.name || "").trim() || "Untitled Trip",
+      title: (local.title || "").trim() || "Untitled Trip",
       origin: (local.origin || "").trim(),
       originCoords: local.originCoords || undefined,
       destination: (local.destination || "").trim(),
@@ -334,8 +332,8 @@ export default function TripMetaEditor({ trip, onSubmit }) {
           <input
             type="text"
             className="mt-1 w-full rounded-lg border border-gray-200 p-2"
-            value={local.name}
-            onChange={(e) => setLocal((s) => ({ ...s, name: e.target.value }))}
+            value={local.title}
+            onChange={(e) => setLocal((s) => ({ ...s, title: e.target.value }))}
           />
         </div>
 

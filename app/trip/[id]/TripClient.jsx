@@ -1,10 +1,9 @@
-// app/trip/[id]/TripClient.jsx
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "../../context/AuthProvider";
 import { loadTrip, saveTrip } from "../../lib/storage";
-import { readTripMeta, writeTripMeta, setItineraryTemplate } from "../../lib/trips";
+import { readTripMeta, writeTripMeta, setItineraryTemplate, removeParticipantFromTrip } from "../../lib/trips";
 import { db } from "../../lib/firebaseClient";
 import { doc, getDoc } from "firebase/firestore";
 
@@ -17,6 +16,7 @@ import TripMediaGallery from "../../components/TripMediaGallery";
 import TripDocsTile from "../../components/TripDocsTile";
 import ExpenseTracker from "../../components/ExpenseTracker";
 import { subscribeChat, sendChatMessage } from "../../lib/chat";
+import { putMediaBlob } from "../../lib/mediaStore";
 
 const MAX_MEDIA_BYTES = 250 * 1024 * 1024;
 
@@ -81,7 +81,7 @@ export default function TripClient({ id }) {
   const [itineraryDirty, setItineraryDirty] = useState(false);
   const [savingItin, setSavingItin] = useState(false);
 
-  const [profiles, setProfiles] = useState({}); // uid -> {name,email,avatar,userId}
+  const [profiles, setProfiles] = useState({}); // uid -> {name,avatar,userId}
   const prevUserRef = useRef(null);
 
   // NEW: live chat state
@@ -149,7 +149,6 @@ export default function TripClient({ id }) {
               ? { currency: remote.budget.currency || "USD", estimated: remote.budget.estimated === null ? null : Number(remote.budget.estimated ?? 0) }
               : { currency: "USD", estimated: null },
           expenses: Array.isArray(remote.expenses) ? remote.expenses : [],
-          // Chat is now Firestore-backed; we will ignore local 'chat' array if present.
           media: Array.isArray(remote.media) ? remote.media : [],
           docs: Array.isArray(remote.docs) ? remote.docs : [],
           changeLog: Array.isArray(remote.changeLog) ? remote.changeLog : [],
@@ -220,16 +219,19 @@ export default function TripClient({ id }) {
 
     const memberUids = unique([trip?.ownerUid, ...Object.keys(trip?.participantsMap || {})]);
     const participantLabels = memberUids
-      .filter((uid) => uid && uid !== trip?.ownerUid)
+      .filter(Boolean)                                  // include owner too
       .map((uid) => {
-        const p = profiles[uid] || {};
+       const p = profiles[uid] || {};
+    // Prefer the short userId for stable identifiers in splits
         return p.userId || p.name || (uid ? uid.slice(0, 6) : "user");
-      });
+    });
 
-    return { origin, destination, nights, daysCount, activities, useWeekly, weeks, dateRange, memberUids, participantLabels };
+    const isGroup = memberUids.length > 1; // NEW: gate group features by members count
+
+    return { origin, destination, nights, daysCount, activities, useWeekly, weeks, dateRange, memberUids, participantLabels, isGroup };
   }, [trip, profiles]);
 
-  // fetch member profiles for avatars
+  // fetch member profiles for avatars (from publicUsers)
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -239,7 +241,7 @@ export default function TripClient({ id }) {
       for (const uid of uids) {
         if (!uid) continue;
         try {
-          const snap = await getDoc(doc(db, "users", uid));
+          const snap = await getDoc(doc(db, "publicUsers", uid));
           if (snap.exists()) out[uid] = snap.data();
           else out[uid] = { name: "User", userId: uid.slice(0, 6) };
         } catch {
@@ -334,7 +336,6 @@ export default function TripClient({ id }) {
   function currentMediaBytes() {
     return (trip.media || []).reduce((sum, m) => sum + (m.size || 0), 0);
   }
-  async function putMediaBlob(id, file) { /* storage placeholder */ }
   async function addTripMedia(files) {
     if (!canUploadMedia) { alert("Please sign in to upload media."); return []; }
     const list = Array.from(files || []);
@@ -365,11 +366,9 @@ export default function TripClient({ id }) {
 
   // ---- NEW: chat sending now writes to Firestore
   async function handleChatSend(text, files) {
-    // For now, messages go to Firestore; media files are still local-only placeholders.
     let mediaIds = [];
     if (files && files.length > 0) {
       mediaIds = await addTripMedia(files);
-      // NOTE: Other participants won't see the media until a shared store is implemented.
     }
     await sendChatMessage(trip.id, {
       fromUid: currentUid,
@@ -377,6 +376,23 @@ export default function TripClient({ id }) {
       text: (text || "").trim(),
       mediaIds,
     });
+  }
+
+  async function handleKick(uid) {
+    if (!canEditMeta) return;
+    if (!uid || uid === trip.ownerUid) return;
+    const p = profiles[uid] || {};
+    const label = p.userId || p.name || uid.slice(0, 6);
+    const ok = window.confirm(`Remove ${label} from this trip? They will lose access immediately.`);
+    if (!ok) return;
+    try {
+      await removeParticipantFromTrip(trip.id, uid, currentUid);
+      const next = structuredClone(trip);
+      if (next.participantsMap) delete next.participantsMap[uid];
+      persist(next, `Removed member ${label}`);
+    } catch (e) {
+      alert("Failed to remove member. Check your permissions.");
+    }
   }
 
   // early returns
@@ -405,9 +421,24 @@ export default function TripClient({ id }) {
     <div className="flex items-center gap-2">
       {derived.memberUids.map((uid, idx) => {
         const p = profiles[uid] || {};
-        const label = p.name || p.email || p.userId || (uid ? uid.slice(0, 6) : "user");
+        const label = p.name || p.userId || (uid ? uid.slice(0, 6) : "user");
         const title = `${label}${uid === trip.ownerUid ? " (owner)" : ""}`;
-        return <Avatar key={`${uid}-${idx}`} src={p.avatar} label={label} title={title} ring={uid === trip.ownerUid ? "owner" : "normal"} />;
+        const isOwner = uid === trip.ownerUid;
+        return (
+          <div key={`${uid}-${idx}`} className="relative">
+            <Avatar src={p.avatar} label={label} title={title} ring={isOwner ? "owner" : "normal"} />
+            {canEditMeta && !isOwner && (
+              <button
+                onClick={() => handleKick(uid)}
+                title="Remove from trip"
+                className="absolute -right-1 -top-1 grid h-4 w-4 place-items-center rounded-full bg-red-600 text-[10px] font-bold text-white hover:bg-red-700"
+                aria-label={`Remove ${label}`}
+              >
+                ×
+              </button>
+            )}
+          </div>
+        );
       })}
     </div>
   );
@@ -445,7 +476,7 @@ export default function TripClient({ id }) {
         </div>
       </section>
 
-      {/* Meta editor ALWAYS visible; submit flips submitted=true */}
+      {/* Meta editor */}
       <TripMetaEditor trip={trip} onSubmit={handleSubmit} />
 
       {/* ---------------- HARD GATE: nothing else until submitted ---------------- */}
@@ -638,7 +669,7 @@ export default function TripClient({ id }) {
             <ExportPDFButton trip={trip} />
           </div>
 
-          {!!(trip.partyType !== "solo") && (
+          {derived.isGroup && (
             <ChatBox
               me={currentShortId}
               tripId={trip.id}

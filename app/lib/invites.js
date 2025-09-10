@@ -2,6 +2,7 @@
 import { db } from "./firebaseClient";
 import {
   addDoc,
+  arrayUnion,
   collection,
   doc,
   getDoc,
@@ -35,9 +36,10 @@ export async function createInvite(fromUid, toUserId, tripId) {
  * Accept and join the trip:
  * - marks invite accepted (+toUid)
  * - adds me as viewer in participants
+ * - adds my uid to memberIds (so dashboard shared list can query via array-contains)
  *
- * Note: Rules allow a non-owner to only add their own participants.{uid}
- * (plus optional updatedAt). We keep the update minimal to satisfy rules.
+ * Rules allow a non-owner to add ONLY their own participants.{uid}
+ * and (now) append memberIds with their own uid.
  */
 export async function acceptInviteAndJoin(inviteId, myUid) {
   if (!inviteId) throw new Error("acceptInviteAndJoin: missing inviteId");
@@ -57,10 +59,11 @@ export async function acceptInviteAndJoin(inviteId, myUid) {
     respondedAt: serverTimestamp(),
   });
 
-  // 2) join trip — only what's allowed by rules for non-owners
+  // 2) join trip — minimal fields per security rules
   const tripRef = doc(db, "trips", tripId);
   await updateDoc(tripRef, {
     [`participants.${myUid}`]: "viewer",
+    memberIds: arrayUnion(myUid),
     updatedAt: serverTimestamp(),
   });
 

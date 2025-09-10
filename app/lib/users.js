@@ -1,4 +1,3 @@
-// app/lib/users.js
 import { db } from "./firebaseClient";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 
@@ -9,7 +8,6 @@ function makeShortId(len = 7) {
   const alphabet = "23456789abcdefghjkmnpqrstuvwxyz";
   let out = "";
   const arr = new Uint32Array(len);
-  // crypto.getRandomValues is available in the browser runtime
   crypto.getRandomValues(arr);
   for (let i = 0; i < len; i++) out += alphabet[arr[i] % alphabet.length];
   return out;
@@ -17,7 +15,7 @@ function makeShortId(len = 7) {
 
 /**
  * Ensure a /users/{uid} profile exists for a signed-in Firebase user.
- * Returns the profile document { id: uid, ...data }.
+ * Also keeps /publicUsers/{uid} in sync for avatars/names (readable by others).
  */
 export async function ensureUserDocument(firebaseUser) {
   if (!firebaseUser) return null;
@@ -25,14 +23,28 @@ export async function ensureUserDocument(firebaseUser) {
 
   const ref = doc(db, "users", uid);
   const snap = await getDoc(ref);
-  if (snap.exists()) return { id: uid, ...snap.data() };
+  if (snap.exists()) {
+    const existing = snap.data();
+    // Upsert publicUsers on every sign-in (fresh avatar/name)
+    const now = new Date().toISOString();
+    await setDoc(
+      doc(db, "publicUsers", uid),
+      {
+        userId: existing.userId || makeShortId(),
+        name: existing.name || displayName || "",
+        avatar: existing.avatar || photoURL || "",
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+    return { id: uid, ...existing };
+  }
 
-  // No cross-user query → avoids rules issues. Generate a short userId once.
+  // Create both docs
   const userId = makeShortId();
-
   const now = new Date().toISOString();
   const data = {
-    userId,                       // short id used for invites
+    userId,
     name: displayName || "",
     email: email || "",
     avatar: photoURL || "",
@@ -42,21 +54,25 @@ export async function ensureUserDocument(firebaseUser) {
   };
 
   await setDoc(ref, data);
-  // Cache the freshly written doc
+  await setDoc(doc(db, "publicUsers", uid), {
+    userId,
+    name: data.name,
+    avatar: data.avatar,
+    updatedAt: now,
+  }, { merge: true });
+
   _cacheSet(uid, data);
   return { id: uid, ...data };
 }
 
 // -------------------------------
 // Lightweight in-memory cache
-// (per tab / per reload; fine for client apps)
 // -------------------------------
 const _profileCache = new Map(); // uid -> {profile, ts}
 
 function _cacheGet(uid) {
   const hit = _profileCache.get(uid);
   if (!hit) return null;
-  // Optional TTL: 2 minutes (tweakable). Set to 0 for no TTL.
   const TTL_MS = 2 * 60 * 1000;
   if (TTL_MS > 0 && Date.now() - hit.ts > TTL_MS) {
     _profileCache.delete(uid);
@@ -70,7 +86,6 @@ function _cacheSet(uid, profile) {
 
 /**
  * Get a single user profile from /users/{uid}.
- * Returns { id: uid, ...data } or null if missing/no access.
  */
 export async function getUserProfile(uid) {
   if (!uid) return null;
@@ -91,12 +106,7 @@ export async function getUserProfile(uid) {
 }
 
 /**
- * Batch-get multiple profiles. Returns an object map:
- *   { [uid]: { id: uid, ...profile } | null }
- * Missing/forbidden docs map to null.
- *
- * This performs individual gets (client SDK has no true batched get for many docs),
- * but leverages the in-memory cache to avoid repeat fetches.
+ * Batch-get multiple profiles from /users (private). (Kept for compatibility)
  */
 export async function getUserProfiles(uids = []) {
   const uniqueUids = Array.from(new Set((uids || []).filter(Boolean)));
@@ -105,7 +115,6 @@ export async function getUserProfiles(uids = []) {
   const out = {};
   const toFetch = [];
 
-  // Serve from cache where possible
   for (const uid of uniqueUids) {
     const cached = _cacheGet(uid);
     if (cached) {
@@ -115,7 +124,6 @@ export async function getUserProfiles(uids = []) {
     }
   }
 
-  // Fetch remaining
   await Promise.all(
     toFetch.map(async (uid) => {
       try {

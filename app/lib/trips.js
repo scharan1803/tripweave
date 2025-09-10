@@ -14,7 +14,6 @@ import {
   setDoc,
   updateDoc,
   where,
-  FieldPath,
   deleteField,
 } from "firebase/firestore";
 
@@ -74,7 +73,7 @@ export async function createTrip(ownerUid, title = "Untitled Trip") {
     archived: false,
     partyType: "solo",
     participants: { [ownerUid]: "owner" }, // uid -> role
-    memberIds: [ownerUid],                 // kept for owner ops; not needed for invites accept
+    memberIds: [ownerUid],                 // used for shared queries (array-contains)
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   };
@@ -96,9 +95,13 @@ export async function renameTrip(tripId, title, userUid) {
 }
 
 /**
- * Shared trips query via participants.{uid}:
- * - owned: where("ownerUid","==",uid)
- * - shared: where(participants.{uid}, "in", ["viewer","editor"]) then client-filter owner
+ * List trips for dashboard:
+ *  - owned:   ownerUid == me, archived == false
+ *  - shared:  memberIds array-contains me, archived == false (owner filtered out)
+ *
+ * One-time composite indexes you may be prompted for:
+ *  trips: ownerUid ASC, archived ASC, updatedAt DESC
+ *  trips: memberIds ARRAY_CONTAINS, archived ASC, updatedAt DESC
  */
 export async function listMyTrips(userUid) {
   if (!userUid) return { owned: [], shared: [] };
@@ -107,15 +110,17 @@ export async function listMyTrips(userUid) {
   const ownedQ = query(
     collection(db, "trips"),
     where("ownerUid", "==", userUid),
+    where("archived", "==", false),
     orderBy("updatedAt", "desc")
   );
   const ownedSnap = await getDocs(ownedQ);
   const owned = ownedSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
 
-  // Shared (I'm a participant but not owner) — via participants.{uid} in ["viewer","editor"]
+  // Shared (I'm a member via memberIds; exclude trips I own)
   const sharedQ = query(
     collection(db, "trips"),
-    where(new FieldPath("participants", userUid), "in", ["viewer", "editor"]),
+    where("memberIds", "array-contains", userUid),
+    where("archived", "==", false),
     orderBy("updatedAt", "desc")
   );
   const sharedSnap = await getDocs(sharedQ);
@@ -125,9 +130,7 @@ export async function listMyTrips(userUid) {
   return { owned, shared };
 }
 
-/**
- * Owner can archive/unarchive
- */
+/** Owner can archive/unarchive */
 export async function setTripArchived(tripId, archived, userUid) {
   if (!tripId) throw new Error("setTripArchived: missing tripId");
   if (!userUid) throw new Error("setTripArchived: missing userUid");
@@ -182,9 +185,7 @@ export async function writeTripMeta(tripId, updates, userUid) {
   await setDoc(ref, payload, { merge: true });
 }
 
-/**
- * Save the itinerary template (UI string[][] -> Firestore-safe)
- */
+/** Save the itinerary template (UI string[][] -> Firestore-safe) */
 export async function setItineraryTemplate(tripId, ownerUid, activities) {
   if (!tripId) throw new Error("setItineraryTemplate: missing tripId");
   if (!ownerUid) throw new Error("setItineraryTemplate: missing ownerUid");
@@ -216,7 +217,7 @@ export async function getTrip(tripId) {
 
 /**
  * Owner action: add/update a participant's role.
- * Also pushes uid into memberIds (owner-permitted; not needed for accept path).
+ * Also pushes uid into memberIds; forces partyType to "group".
  */
 export async function addParticipantToTrip(tripId, targetUid, role = "viewer", actingUid) {
   if (!tripId) throw new Error("addParticipantToTrip: missing tripId");
@@ -233,10 +234,7 @@ export async function addParticipantToTrip(tripId, targetUid, role = "viewer", a
   });
 }
 
-/**
- * Owner action: remove a participant.
- * Also removes from memberIds.
- */
+/** Owner action: remove a participant (also from memberIds). */
 export async function removeParticipantFromTrip(tripId, targetUid, actingUid) {
   if (!tripId) throw new Error("removeParticipantFromTrip: missing tripId");
   if (!targetUid) throw new Error("removeParticipantFromTrip: missing targetUid");
@@ -251,7 +249,7 @@ export async function removeParticipantFromTrip(tripId, targetUid, actingUid) {
 }
 
 /**
- * Owner action: force reset to SOLO (used by UI confirm).
+ * Owner action: force reset to SOLO.
  * Leaves only owner in participants & memberIds.
  */
 export async function forceSoloResetParticipants(tripId, ownerUid) {
