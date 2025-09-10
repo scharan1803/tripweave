@@ -5,19 +5,33 @@ import {
   arrayRemove,
   arrayUnion,
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
-  orderBy,
   query,
   serverTimestamp,
   setDoc,
   updateDoc,
   where,
-  deleteField,
+  FieldPath,
 } from "firebase/firestore";
 
 /** ---------- Helpers ---------- **/
+
+function tsToMillis(x) {
+  // Firestore Timestamp → millis fallback
+  if (!x) return 0;
+  if (typeof x === "number") return x;
+  if (x?.toMillis) return x.toMillis();
+  return 0;
+}
+
+function sortByUpdatedDesc(arr) {
+  return [...arr].sort(
+    (a, b) => tsToMillis(b.updatedAt) - tsToMillis(a.updatedAt)
+  );
+}
 
 // Normalize nested arrays (Firestore doesn't allow arrays directly inside arrays)
 function normalizeForFirestore(value, insideArray = false) {
@@ -73,7 +87,7 @@ export async function createTrip(ownerUid, title = "Untitled Trip") {
     archived: false,
     partyType: "solo",
     participants: { [ownerUid]: "owner" }, // uid -> role
-    memberIds: [ownerUid],                 // used for shared queries (array-contains)
+    memberIds: [ownerUid],                 // kept for owner ops; not needed for accept path
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   };
@@ -95,42 +109,47 @@ export async function renameTrip(tripId, title, userUid) {
 }
 
 /**
- * List trips for dashboard:
- *  - owned:   ownerUid == me, archived == false
- *  - shared:  memberIds array-contains me, archived == false (owner filtered out)
- *
- * One-time composite indexes you may be prompted for:
- *  trips: ownerUid ASC, archived ASC, updatedAt DESC
- *  trips: memberIds ARRAY_CONTAINS, archived ASC, updatedAt DESC
+ * NEW: Index-friendly listing (no orderBy, no 'in')
+ * - Owned: where("ownerUid","==",uid)
+ * - Shared: two equality queries:
+ *     where("participants.{uid}","==","viewer")
+ *     where("participants.{uid}","==","editor")
+ *   then filter out owner and merge results client-side.
  */
 export async function listMyTrips(userUid) {
   if (!userUid) return { owned: [], shared: [] };
 
+  const tripsCol = collection(db, "trips");
+
   // Owned
-  const ownedQ = query(
-    collection(db, "trips"),
-    where("ownerUid", "==", userUid),
-    where("archived", "==", false),
-    orderBy("updatedAt", "desc")
-  );
-  const ownedSnap = await getDocs(ownedQ);
+  const ownedSnap = await getDocs(query(tripsCol, where("ownerUid", "==", userUid)));
   const owned = ownedSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
 
-  // Shared (I'm a member via memberIds; exclude trips I own)
-  const sharedQ = query(
-    collection(db, "trips"),
-    where("memberIds", "array-contains", userUid),
-    where("archived", "==", false),
-    orderBy("updatedAt", "desc")
+  // Shared (accepted): equality queries avoid 'in' and orderBy → fewer composite indexes
+  const viewerSnap = await getDocs(
+    query(tripsCol, where(new FieldPath("participants", userUid), "==", "viewer"))
   );
-  const sharedSnap = await getDocs(sharedQ);
-  const sharedAll = sharedSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
-  const shared = sharedAll.filter((t) => t.ownerUid !== userUid);
+  const editorSnap = await getDocs(
+    query(tripsCol, where(new FieldPath("participants", userUid), "==", "editor"))
+  );
 
-  return { owned, shared };
+  const sharedMap = new Map();
+  for (const d of [...viewerSnap.docs, ...editorSnap.docs]) {
+    const trip = { id: d.id, ...d.data() };
+    if (trip.ownerUid !== userUid) sharedMap.set(d.id, trip);
+  }
+  const shared = Array.from(sharedMap.values());
+
+  // Client-side sort by updatedAt desc
+  return {
+    owned: sortByUpdatedDesc(owned),
+    shared: sortByUpdatedDesc(shared),
+  };
 }
 
-/** Owner can archive/unarchive */
+/**
+ * Owner can archive/unarchive
+ */
 export async function setTripArchived(tripId, archived, userUid) {
   if (!tripId) throw new Error("setTripArchived: missing tripId");
   if (!userUid) throw new Error("setTripArchived: missing userUid");
@@ -144,8 +163,7 @@ export async function setTripArchived(tripId, archived, userUid) {
 
 /**
  * Create/update trip metadata (merge).
- * If switching to SOLO, we **also** reset participants to only the owner
- * and set memberIds = [ownerUid].
+ * If switching to SOLO, we reset participants to only the owner and set memberIds.
  */
 export async function writeTripMeta(tripId, updates, userUid) {
   if (!tripId) throw new Error("writeTripMeta: missing tripId");
@@ -173,7 +191,6 @@ export async function writeTripMeta(tripId, updates, userUid) {
     updatedAt: serverTimestamp(),
   };
 
-  // If owner is switching to SOLO, scrub participants & memberIds.
   const switchingToSolo =
     (current.partyType || "solo") !== "solo" && payload.partyType === "solo";
 
@@ -185,7 +202,9 @@ export async function writeTripMeta(tripId, updates, userUid) {
   await setDoc(ref, payload, { merge: true });
 }
 
-/** Save the itinerary template (UI string[][] -> Firestore-safe) */
+/**
+ * Save itinerary template
+ */
 export async function setItineraryTemplate(tripId, ownerUid, activities) {
   if (!tripId) throw new Error("setItineraryTemplate: missing tripId");
   if (!ownerUid) throw new Error("setItineraryTemplate: missing ownerUid");
@@ -215,10 +234,7 @@ export async function getTrip(tripId) {
   return readTripMeta(tripId);
 }
 
-/**
- * Owner action: add/update a participant's role.
- * Also pushes uid into memberIds; forces partyType to "group".
- */
+/** Owner action: add/update a participant's role. */
 export async function addParticipantToTrip(tripId, targetUid, role = "viewer", actingUid) {
   if (!tripId) throw new Error("addParticipantToTrip: missing tripId");
   if (!targetUid) throw new Error("addParticipantToTrip: missing targetUid");
@@ -234,7 +250,7 @@ export async function addParticipantToTrip(tripId, targetUid, role = "viewer", a
   });
 }
 
-/** Owner action: remove a participant (also from memberIds). */
+/** Owner action: remove a participant. */
 export async function removeParticipantFromTrip(tripId, targetUid, actingUid) {
   if (!tripId) throw new Error("removeParticipantFromTrip: missing tripId");
   if (!targetUid) throw new Error("removeParticipantFromTrip: missing targetUid");
@@ -242,24 +258,18 @@ export async function removeParticipantFromTrip(tripId, targetUid, actingUid) {
 
   const ref = doc(db, "trips", tripId);
   await updateDoc(ref, {
-    [`participants.${targetUid}`]: deleteField(),
+    [`participants.${targetUid}`]: null,
     memberIds: arrayRemove(targetUid),
     updatedAt: serverTimestamp(),
   });
 }
 
 /**
- * Owner action: force reset to SOLO.
- * Leaves only owner in participants & memberIds.
+ * NEW: Owner delete. This deletes the trip doc itself (subcollections remain).
+ * Security rules enforce owner-only deletes.
  */
-export async function forceSoloResetParticipants(tripId, ownerUid) {
-  if (!tripId) throw new Error("forceSoloResetParticipants: missing tripId");
-  if (!ownerUid) throw new Error("forceSoloResetParticipants: missing ownerUid");
-  const ref = doc(db, "trips", tripId);
-  await updateDoc(ref, {
-    participants: { [ownerUid]: "owner" },
-    memberIds: [ownerUid],
-    partyType: "solo",
-    updatedAt: serverTimestamp(),
-  });
+export async function deleteTripAsOwner(tripId, ownerUid) {
+  if (!tripId) throw new Error("deleteTripAsOwner: missing tripId");
+  if (!ownerUid) throw new Error("deleteTripAsOwner: missing ownerUid");
+  await deleteDoc(doc(db, "trips", tripId));
 }
