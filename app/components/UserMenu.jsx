@@ -62,7 +62,7 @@ export default function UserMenu() {
     return (
       <button
         onClick={handleSignIn}
-        className="rounded-lg bg-gray-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-black"
+        className="rounded-sm bg-gray-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-black"
       >
         Sign in with Google
       </button>

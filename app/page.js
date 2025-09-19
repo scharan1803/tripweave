@@ -99,7 +99,7 @@ export default function HomePage() {
 
   return (
     <main className="mx-auto max-w-xl py-20 px-4">
-      <h1 className="text-3xl font-bold mb-6 text-center">Where do you want to go?</h1>
+      <h1 className="text-2xl font-semibold mb-6 text-center">Where do you want to go?</h1>
       <div ref={wrapRef} className="relative flex items-center gap-2">
         <div className="relative flex-1">
           <input

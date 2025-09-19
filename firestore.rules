@@ -1,0 +1,163 @@
+// Firestore Security Rules – TripWeave (private-by-default)
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /* Helpers */
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // (Short) user id is stored in /users/{uid}.userId
+    function myUserId() {
+      return isSignedIn()
+        ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data.userId
+        : null;
+    }
+
+    function isOwner() {
+      return isSignedIn() && resource.data.ownerUid == request.auth.uid;
+    }
+
+    function isParticipant() {
+      return isSignedIn() &&
+        resource.data.participants[request.auth.uid] in ["owner", "editor", "viewer"];
+    }
+
+    // Allow a user to add themself as a participant (viewer/editor) and (optionally) append
+    // their uid to memberIds. Nothing else.
+    function onlyAddsSelfParticipant() {
+      // At the top level, ONLY these keys may change (optionally updatedAt).
+      let topDiff = request.resource.data.diff(resource.data).changedKeys();
+      let topOk =
+        topDiff.hasOnly(["participants"]) ||
+        topDiff.hasOnly(["participants", "updatedAt"]) ||
+        topDiff.hasOnly(["participants", "memberIds"]) ||
+        topDiff.hasOnly(["participants", "memberIds", "updatedAt"]);
+
+      // participants: only add my own entry; role must be viewer or editor; key must not exist
+      let partDiff = request.resource.data.participants.diff(resource.data.participants);
+      let addedOk = partDiff.addedKeys().hasOnly([request.auth.uid]);
+      let roleOk =
+        request.resource.data.participants[request.auth.uid] in ["viewer", "editor"] &&
+        !(request.auth.uid in resource.data.participants);
+
+      // memberIds: either unchanged, or append my uid (size can grow by at most 1 and must include me)
+      // Guard missing arrays
+      let hadIds = 'memberIds' in resource.data;
+      let hasIds = 'memberIds' in request.resource.data;
+      let prevLen = hadIds ? resource.data.memberIds.size() : 0;
+      let nextLen = hasIds ? request.resource.data.memberIds.size() : 0;
+
+      let memberOk =
+        // not provided in the update → unchanged
+        (!hasIds && !hadIds) ||
+        (!hasIds && hadIds) ||
+        // provided → either same length (no append) or +1 containing my uid
+        (hasIds && (
+          (nextLen == prevLen) ||
+          (nextLen == prevLen + 1 && request.auth.uid in request.resource.data.memberIds)
+        ));
+
+      return topOk && addedOk && roleOk && memberOk;
+    }
+
+    /* Healthchecks (dev) */
+    match /healthchecks/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    /* Private per-user profiles (self only) */
+    match /users/{uid} {
+      allow read, write: if isSignedIn() && request.auth.uid == uid;
+    }
+
+    /* Public minimal profiles, readable by any signed-in user (for avatars/names) */
+    match /publicUsers/{uid} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && request.auth.uid == uid;
+      // (Deletes by others are implicitly denied.)
+    }
+
+    /* Trips */
+    match /trips/{tripId} {
+
+      // Read: owner or any participant
+      allow read: if isOwner() || isParticipant();
+
+      // Create: owner creates & stamps themselves
+      allow create: if isSignedIn()
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.title is string
+        && request.resource.data.createdAt != null
+        && request.resource.data.participants[request.auth.uid] == "owner";
+
+      // Update/Delete:
+      // - Owner can update/delete freely
+      // - Non-owner can only add their own participants.{uid} (viewer/editor) + optional memberIds append + updatedAt
+      allow update: if isOwner() || onlyAddsSelfParticipant();
+      allow delete: if isOwner();
+
+      // Chat subcollection: /trips/{tripId}/chat/{msgId}
+      match /chat/{msgId} {
+        // Read: owner or any participant of the parent trip
+        allow read: if isSignedIn() && (
+          get(/databases/$(database)/documents/trips/$(tripId)).data.ownerUid == request.auth.uid ||
+          get(/databases/$(database)/documents/trips/$(tripId)).data.participants[request.auth.uid] in ["owner","editor","viewer"]
+        );
+
+        // Create: signed-in AND owner/participant; fromUid must equal caller
+        allow create: if isSignedIn()
+          && (
+            get(/databases/$(database)/documents/trips/$(tripId)).data.ownerUid == request.auth.uid ||
+            get(/databases/$(database)/documents/trips/$(tripId)).data.participants[request.auth.uid] in ["owner","editor","viewer"]
+          )
+          && request.resource.data.fromUid == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.createdAt != null;
+
+        // Updates/deletes of chat messages are disallowed for now (immutable)
+        allow update, delete: if false;
+      }
+
+      // Optional per-user itineraries: /trips/{tripId}/itineraries/{userUid}
+      match /itineraries/{userUid} {
+        // Read: yourself; owner/editor can read for support
+        allow read: if isSignedIn() && (
+          request.auth.uid == userUid ||
+          get(/databases/$(database)/documents/trips/$(tripId)).data.ownerUid == request.auth.uid ||
+          get(/databases/$(database)/documents/trips/$(tripId)).data.participants[request.auth.uid] in ["owner","editor"]
+        );
+
+        // Write: only yourself
+        allow create, update, delete: if isSignedIn() && request.auth.uid == userUid;
+      }
+    }
+
+    /* Trip Invites */
+    match /tripInvites/{inviteId} {
+
+      // Create: owner sends an invite to a short userId
+      allow create: if isSignedIn()
+        && request.resource.data.fromUid == request.auth.uid
+        && request.resource.data.toUserId is string
+        && request.resource.data.tripId is string
+        && request.resource.data.status == "pending";
+
+      // Read: sender or recipient (by short userId)
+      allow read: if isSignedIn()&& (
+        resource.data.fromUid == request.auth.uid ||
+        resource.data.toUserId == myUserId() 
+      );
+
+      // Update: recipient accepts/declines; when accepting, they may stamp toUid = their uid
+      allow update: if isSignedIn()
+        && resource.data.toUserId == myUserId()
+        && request.resource.data.status in ["accepted","declined"]
+        && (!('toUid' in request.resource.data) || request.resource.data.toUid == request.auth.uid);
+
+      // (Optional) allow the sender to delete their outgoing invite
+      allow delete: if isSignedIn() && resource.data.fromUid == request.auth.uid;
+    }
+  }
+}

@@ -1,148 +1,237 @@
 /* app/globals.css */
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&display=swap');
 
 /* Tailwind base layers */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/* ---------- Base resets & typography ---------- */
+/* ────────────────────────────────────────────────────────────
+   GLOBAL THEME KNOBS
+   • Increase --tileLayerOpacity to brighten all tiles (0.00–1.00)
+   • --tileStopAlpha controls color stop transparency inside gradients
+   • Glass "white pop" uses --surface* and per-tile --tileGlass* vars
+   ──────────────────────────────────────────────────────────── */
+:root {
+  --tileLayerOpacity: 0.20;   /* master color intensity */
+  --tileStopAlpha:   0.74;    /* per-stop alpha inside gradients */
+
+  --surfaceBg:       rgba(255,255,255,0.86);
+  --surfaceRing:     1px solid rgba(0,0,0,0.06);
+  --surfaceShadow:   0 8px 26px rgba(0,0,0,0.10), 0 2px 6px rgba(0,0,0,0.06);
+  --surfaceInset:    inset 0 1px 0 rgba(255,255,255,0.65);
+}
+
+/* ────────────────────────────────────────────────────────────
+   BASE / RESETS
+   ──────────────────────────────────────────────────────────── */
 @layer base {
-  html, body {
-    @apply h-full font-sans text-gray-900 antialiased;
-  }
+  html, body { @apply h-full font-sans text-gray-900 antialiased; }
+  :focus-visible { @apply outline-none ring-2 ring-black/10; }
+  input, select, textarea, button { @apply text-[15px]; }
 
-  /* Smooth focus styles */
-  :focus-visible {
-    @apply outline-none ring-2 ring-black/10;
-  }
-
-  /* Native dialog baseline */
-  dialog {
-    @apply rounded-xl border border-black/10 p-0;
-  }
-
-  /* Form control base size */
-  input, select, textarea, button {
-    @apply text-[15px];
-  }
-
-  /* Optional: simple scrollbars (WebKit) */
+  /* Simple scrollbars (WebKit) */
   *::-webkit-scrollbar { width: 10px; height: 10px; }
   *::-webkit-scrollbar-thumb { @apply bg-black/10 rounded-full; }
   *::-webkit-scrollbar-track { @apply bg-black/5; }
 }
 
-/* ---------- Glassy component tokens ---------- */
-@layer components {
-  /* Buttons */
-  .btn {
-    @apply inline-flex items-center justify-center rounded-full px-4 py-2 text-sm font-semibold transition;
-  }
-  .btn-primary {
-    @apply btn bg-black text-white shadow-lg hover:bg-neutral-900 disabled:cursor-not-allowed disabled:bg-neutral-300;
-  }
-  .btn-outline {
-    @apply btn border border-black/10 bg-white/80 hover:bg-white;
-  }
-  .btn-ghost {
-    @apply btn text-gray-800 hover:bg-black/5;
-  }
-  .btn-danger {
-    @apply btn bg-red-600 text-white hover:bg-red-700 disabled:opacity-60;
-  }
-
-  /* Inputs & selects */
-  .input {
-    @apply w-full rounded-2xl border border-white/60 bg-white/70 px-3 py-2 text-sm shadow-inner outline-none focus:border-black;
-  }
-  .select {
-    @apply rounded-2xl border border-white/60 bg-white/70 px-3 py-2 text-sm shadow-inner outline-none focus:border-black;
-  }
-  .textarea {
-    @apply w-full rounded-2xl border border-white/60 bg-white/70 px-3 py-2 text-sm shadow-inner outline-none focus:border-black;
-  }
-
-  /* Pills/badges */
-  .badge {
-    @apply inline-flex items-center gap-1 rounded-full border border-white/60 bg-white/70 px-2.5 py-1 text-xs font-medium text-gray-700 backdrop-blur;
-  }
-  .badge-info {
-    @apply badge border-blue-200 bg-blue-50 text-blue-700;
-  }
-  .badge-warn {
-    @apply badge border-amber-200 bg-amber-50 text-amber-700;
-  }
-  .badge-danger {
-    @apply badge border-red-200 bg-red-50 text-red-700;
-  }
-
-  /* Cards & shells */
-  .card {
-    @apply rounded-3xl border border-white/50 bg-white/70 p-5 shadow-xl backdrop-blur-xl;
-  }
-  .divider {
-    @apply my-4 h-px w-full bg-black/10;
-  }
-  .empty-state {
-    @apply rounded-2xl border border-dashed border-black/10 p-4 text-center text-sm text-gray-500;
-  }
-  .icon-button {
-    @apply inline-grid h-9 w-9 place-items-center rounded-2xl border border-white/60 bg-white/80 text-gray-800 hover:bg-white;
-  }
-
-  /* Small utility badges */
-  .weather-badge {
-    @apply inline-flex items-center gap-1 rounded-full border border-white/60 bg-white/80 px-2 py-0.5 text-xs text-gray-700 backdrop-blur;
-  }
-
-  /* Helper text */
-  .hint {
-    @apply mt-1 text-xs text-gray-500;
-  }
-}
-
-/* ---------- Subtle full-page poster background ---------- */
+/* Poster background (subtle) */
 html, body { height: 100%; }
-/* Keep body transparent so the poster shows through glass UI */
 body { background-color: transparent !important; }
-
 body::before {
   content: "";
-  position: fixed;
-  inset: 0;
-  z-index: -1;
-  background-image: url("/media/hero-poster.jpg"); /* replace if needed */
-  background-size: cover;
-  background-position: center;
-  background-repeat: no-repeat;
-  /* lighter overlay so glass components pop */
-  box-shadow: inset 0 0 0 100vmax rgba(0,0,0,0.12);
+  position: fixed; inset: 0; z-index: -1;
+  background: url("/media/hero-poster.jpg") center / cover no-repeat;
+  box-shadow: inset 0 0 0 100vmax rgba(0,0,0,0.10);
   pointer-events: none;
 }
 
-/* ---------- Utilities ---------- */
+/* ────────────────────────────────────────────────────────────
+   COMPONENT TOKENS (buttons, inputs, badges, cards)
+   ──────────────────────────────────────────────────────────── */
+@layer components {
+  .btn { @apply inline-flex items-center justify-center rounded-full px-4 py-2 text-sm font-semibold transition; }
+  .btn-primary { @apply btn bg-black text-white shadow-lg hover:bg-neutral-900 disabled:cursor-not-allowed disabled:bg-neutral-300; }
+  .btn-outline { @apply btn border border-black/10 bg-white/80 hover:bg-white; }
+  .btn-ghost { @apply btn text-gray-800 hover:bg-black/5; }
+  .btn-danger { @apply btn bg-red-600 text-white hover:bg-red-700 disabled:opacity-60; }
+
+  .input, .select, .textarea {
+    @apply rounded-2xl border border-white/60 bg-white/80 px-3 py-2 text-sm shadow-inner outline-none focus:border-black;
+  }
+  .input, .textarea { @apply w-full; }
+
+  .badge { @apply inline-flex items-center gap-1 rounded-full border border-white/60 bg-white/70 px-2.5 py-1 text-xs font-medium text-gray-700 backdrop-blur; }
+  .badge-info  { @apply badge border-blue-200 bg-blue-50 text-blue-700; }
+  .badge-warn  { @apply badge border-amber-200 bg-amber-50 text-amber-700; }
+  .badge-danger{ @apply badge border-red-200 bg-red-50 text-red-700; }
+
+  .card { @apply rounded-3xl border border-white/50 bg-white/80 p-5 shadow-xl backdrop-blur-xl; }
+  .divider { @apply my-4 h-px w-full bg-black/10; }
+  .empty-state { @apply rounded-2xl border border-dashed border-black/10 p-4 text-center text-sm text-gray-500; }
+  .icon-button { @apply inline-grid h-9 w-9 place-items-center rounded-2xl border border-white/60 bg-white/80 text-gray-800 hover:bg-white; }
+
+  .weather-badge { @apply inline-flex items-center gap-1 rounded-full border border-white/60 bg-white/80 px-2 py-0.5 text-xs text-gray-700 backdrop-blur; }
+  .hint { @apply mt-1 text-xs text-gray-500; }
+}
+
+/* ────────────────────────────────────────────────────────────
+   UTILITIES
+   ──────────────────────────────────────────────────────────── */
 @layer utilities {
-  .no-select {
-    -webkit-user-select: none;
-    -moz-user-select: none;
-    user-select: none;
+  .no-select { -webkit-user-select:none; -moz-user-select:none; user-select:none; }
+  .truncate-1, .truncate-2, .truncate-3 {
+    display:-webkit-box; -webkit-box-orient:vertical; overflow:hidden;
   }
-  .truncate-1 {
-    display: -webkit-box;
-    -webkit-line-clamp: 1;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-  .truncate-2 {
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-  .truncate-3 {
-    display: -webkit-box;
-    -webkit-line-clamp: 3;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
+  .truncate-1 { -webkit-line-clamp:1; }
+  .truncate-2 { -webkit-line-clamp:2; }
+  .truncate-3 { -webkit-line-clamp:3; }
+}
+
+/* ────────────────────────────────────────────────────────────
+   TILE SYSTEM (colorized background that never tints content)
+   Apply .tw-tile and one of the color variants.
+   Leave headers & Trip Log without variant to stay neutral.
+   ──────────────────────────────────────────────────────────── */
+.tw-tile {
+  /* base surface */
+  position: relative; isolation: isolate; z-index: 0;
+  border-radius: 1.25rem; /* 20px */
+  background: var(--surfaceBg);
+  border: var(--surfaceRing);
+  box-shadow: var(--surfaceShadow);
+  overflow: hidden;
+
+  /* default glass knobs (can be overridden per tile) */
+  --tileGlassBlur: 0px;
+  --tileGlassBg:   rgba(255,255,255,0.30);
+}
+
+/* Content sits ABOVE color and glass layers */
+.tw-tile > * { position: relative; z-index: 2; }
+
+/* Color layer (behind) */
+.tw-tile::before {
+  content: "";
+  position: absolute; inset: -20px;
+  z-index: 0; pointer-events: none; border-radius: inherit;
+  background: transparent;                 /* set by variant */
+  opacity: var(--tileLayerOpacity);
+  transition: opacity .18s ease, transform .18s ease;
+}
+
+/* Glass film (between color and content) */
+.tw-tile::after {
+  content: "";
+  position: absolute; inset: 0; border-radius: inherit;
+  z-index: 1; pointer-events: none;
+  backdrop-filter: blur(var(--tileGlassBlur));
+  -webkit-backdrop-filter: blur(var(--tileGlassBlur));
+  background: var(--tileGlassBg);
+  transition: backdrop-filter .25s ease, background-color .25s ease, opacity .2s ease;
+}
+
+/* Interaction fade (hover/focus/active) */
+.tw-tile:hover::before { opacity: calc(var(--tileLayerOpacity) * .40); }
+.tw-tile:focus-within::before,
+.tw-tile:active::before { opacity: 0; }
+
+/* Keep content from escaping */
+.tw-tile * { max-width: 100%; }
+
+/* Compact adjustments for dense tiles */
+.tw-compact h3 { @apply text-base font-semibold; }
+.tw-compact .input, .tw-compact .select, .tw-compact .textarea { @apply text-[14px] py-2; }
+
+/* Optional inner surface that “pops” on white */
+.surface-elevate {
+  background: #fff;
+  box-shadow: var(--surfaceInset), 0 0 0 1px rgba(0,0,0,.05), 0 6px 18px rgba(0,0,0,.08);
+  border-radius: .75rem;
+}
+
+/* Wide/tall helpers */
+.tw-wide { width: 100%; }
+.tw-tall { min-height: 18rem; }
+
+/* ────────────────────────────────────────────────────────────
+   COLOR VARIANTS
+   ──────────────────────────────────────────────────────────── */
+
+/* Kaleidoscopic (Trip Meta editor). Softer by default. */
+.tile--kaleido {
+  --tileLayerOpacity: 0.20;  /* softened just for this tile */
+  --tileStopAlpha:   0.12;
+}
+.tile--kaleido::before {
+  background:
+    radial-gradient(1200px 600px at 10% 10%, rgba(244,114,182,var(--tileStopAlpha)) 0%, transparent 60%),
+    radial-gradient(1000px 520px at 90% 8%,  rgba(56,189,248,var(--tileStopAlpha)) 0%, transparent 55%),
+    radial-gradient(1200px 700px at 20% 90%, rgba(74,222,128,var(--tileStopAlpha)) 0%, transparent 60%),
+    radial-gradient(900px 600px  at 80% 85%, rgba(251,191,36, var(--tileStopAlpha)) 0%, transparent 55%),
+    linear-gradient(135deg,
+      rgba(236, 72,153,var(--tileStopAlpha)),
+      rgba( 59,130,246,var(--tileStopAlpha)) 35%,
+      rgba( 16,185,129,var(--tileStopAlpha)) 70%,
+      rgba(234,179,  8,var(--tileStopAlpha)) 100%);
+}
+
+/* Expense tracker – translucent purple/indigo */
+.tile--expense::before {
+  background: linear-gradient(135deg,
+    rgba(147, 51,234,var(--tileStopAlpha)),
+    rgba( 99,102,241,var(--tileStopAlpha)));
+}
+
+/* Itinerary – sea green */
+.tile--itinerary::before {
+  background: linear-gradient(135deg,
+    rgba( 16,185,129,var(--tileStopAlpha)),
+    rgba(125,211,252,var(--tileStopAlpha)));
+}
+
+/* Trip Media – orangish pink */
+.tile--media::before {
+  background: linear-gradient(135deg,
+    rgba(251,146, 60,var(--tileStopAlpha)),
+    rgba(244,114,182,var(--tileStopAlpha)));
+}
+
+/* Transportation – cool sky */
+.tile--transport::before {
+  background: linear-gradient(135deg,
+    rgba( 56,189,248,var(--tileStopAlpha)),
+    rgba( 59,130,246,var(--tileStopAlpha)));
+}
+
+/* Trip Docs – warm sand */
+.tile--docs::before {
+  background: linear-gradient(135deg,
+    rgba(253,230,138,var(--tileStopAlpha)),
+    rgba(251,191, 36,var(--tileStopAlpha)));
+}
+
+/* Light glass blur for Media / Itinerary / Transport */
+.tile--media,
+.tile--itinerary,
+.tile--transport {
+  --tileGlassBlur: 8px;
+  --tileGlassBg:   rgba(255,255,255,0.60);
+}
+
+/* Explicit “no color” option if ever needed */
+.tile--none::before { background: transparent; opacity: 0 !important; }
+
+/* Optional: DnD can add a .dragging class to the page to dim color fully */
+/* .dragging .tw-tile::before { opacity: 0; } */
+/* Liquid glass preset */
+.tw-tile {
+  --tileGlassBlur: 18px;
+  --tileGlassBg: rgba(255,255,255,0.35);
+  --tileLayerOpacity: 0.75;
+  --tileStopAlpha: 0.18;
+  box-shadow:
+    inset 0 1px 2px rgba(255,255,255,0.35),
+    0 8px 28px rgba(0,0,0,0.15);
 }
