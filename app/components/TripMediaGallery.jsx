@@ -2,7 +2,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { getMediaURL } from "../lib/mediaStore";
+import { getMediaURL, getTripMediaURL, subscribeTripMedia } from "../lib/mediaStore";
 
 function AvatarDot({ name = "User", avatar }) {
   if (avatar) {
@@ -32,21 +32,41 @@ function AvatarDot({ name = "User", avatar }) {
 
 export default function TripMediaGallery({
   tripId,
-  media = [], // [{id,name,type,size,createdAt, ownerUid?, ownerName?, ownerAvatar?}]
+  media = [], // local history (solo & compatibility)
   partyType = "solo",
   onAddMedia, // async (FileList|File[]) => Promise<void>
 }) {
-  const [urls, setUrls] = useState({}); // { [id]: objectURL }
+  const [urls, setUrls] = useState({}); // { [id]: urlString }
+  const [indexRows, setIndexRows] = useState(media); // for group trips, live index
   const inputRef = useRef(null);
 
+  // Subscribe to Firestore index for group trips
+  useEffect(() => {
+    if (partyType !== "group" || !tripId) {
+      setIndexRows(media);
+      return;
+    }
+    const unsub = subscribeTripMedia(tripId, (rows) => setIndexRows(rows || []));
+    return () => unsub();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tripId, partyType]);
+
+  // Hydrate previews (remote first, then local fallback)
   useEffect(() => {
     let cancelled = false;
 
-    async function hydrate() {
+    async function hydrate(list) {
       const entries = await Promise.all(
-        media.map(async (m) => {
-          const url = await getMediaURL(m.id);
-          return [m.id, url];
+        (list || []).map(async (m) => {
+          const id = m.id;
+          let url = null;
+          if (partyType === "group") {
+            url = await getTripMediaURL(tripId, id);
+          }
+          if (!url) {
+            url = await getMediaURL(id); // solo/local fallback
+          }
+          return [id, url];
         })
       );
       if (!cancelled) {
@@ -56,13 +76,18 @@ export default function TripMediaGallery({
       }
     }
 
-    hydrate();
+    hydrate(indexRows);
     return () => {
       cancelled = true;
-      Object.values(urls).forEach((u) => u && URL.revokeObjectURL(u));
+      // Revoke any blob: URLs we created locally
+      Object.values(urls).forEach((u) => {
+        try {
+          if (u && typeof u === "string" && u.startsWith("blob:")) URL.revokeObjectURL(u);
+        } catch {}
+      });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tripId, media.length]);
+  }, [tripId, partyType, indexRows.map((m) => m.id).join("|")]);
 
   async function handlePick(e) {
     const inputEl = e.currentTarget || inputRef.current;
@@ -96,7 +121,7 @@ export default function TripMediaGallery({
         )}
       </div>
 
-      {media.length === 0 ? (
+      {indexRows.length === 0 ? (
         <p className="text-sm text-gray-500">
           {canDirectUpload
             ? "No media yet. Use “Add media” to upload images, videos, or voice notes."
@@ -104,7 +129,7 @@ export default function TripMediaGallery({
         </p>
       ) : (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
-          {media.map((m) => {
+          {indexRows.map((m) => {
             const url = urls[m.id];
             const major = (m.type || "").split("/")[0];
             const name = m.ownerName || "User";

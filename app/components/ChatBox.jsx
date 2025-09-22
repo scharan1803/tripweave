@@ -2,17 +2,19 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { getMediaURL } from "../lib/mediaStore";
+import { getMediaURL, getTripMediaURL, getTripMediaMeta } from "../lib/mediaStore";
 
 /**
  * Props:
- * - me: current short id (string)
- * - tripId: id
- * - messages: [{id, from, text, at, mediaIds:[]}]
- * - mediaIndex: [{id, name, type, ...}]  // to resolve mediaIds to blobs
- * - onSend(text, FileList | File[]) => Promise<void>
+ * - me: string
+ * - tripId: string
+ * - messages: [{ id, fromUid, fromShortId, fromName, fromAvatar, text, at(ms), mediaIds: string[] }]
+ * - mediaIndex: [{ id, name, type, size, createdAt }]
+ * - onSend: async (text, File[] | FileList) => void
  * - typing: { names: string[], meTyping: boolean }
- * - onTyping(isTyping:boolean) -> void
+ * - onTyping: (boolean) => void
+ * - docked?: boolean
+ * - startOpen?: boolean
  */
 export default function ChatBox({
   me,
@@ -22,253 +24,377 @@ export default function ChatBox({
   onSend,
   typing = { names: [], meTyping: false },
   onTyping,
+  docked = false,
   startOpen = false,
-  docked = true,
 }) {
-  const [open, setOpen] = useState(startOpen);
+  const [open, setOpen] = useState(docked ? !!startOpen : true);
   const [text, setText] = useState("");
   const [files, setFiles] = useState([]);
-  const [previews, setPreviews] = useState({}); // id -> objectURL
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [unreadBounce, setUnreadBounce] = useState(false);
 
-  const inputRef = useRef(null);
-  const fileRef = useRef(null);
-  const listRef = useRef(null);
-
-  // ---- Typing: input-driven, debounced, effect-free (prevents render loops) ----
+  const fileInputRef = useRef(null);
   const typingTimerRef = useRef(null);
-  const lastTypingSentRef = useRef(false);
-  const onTypingRef = useRef(onTyping);
+  const listRef = useRef(null);
+  const prevMsgCount = useRef(messages.length);
+
   useEffect(() => {
-    onTypingRef.current = onTyping;
-  }, [onTyping]);
+    if (!open) return;
+    const el = listRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [open, messages.length]);
 
-  function notifyTyping(flag) {
-    if (!onTypingRef.current || lastTypingSentRef.current === flag) return;
-    lastTypingSentRef.current = flag;
-    try {
-      onTypingRef.current(flag);
-    } catch {}
-  }
-
-  function handleInputChange(e) {
-    const v = e.target.value;
-    setText(v);
-    // announce typing on keystroke, then clear after idle
-    notifyTyping(true);
-    clearTimeout(typingTimerRef.current);
-    typingTimerRef.current = setTimeout(() => notifyTyping(false), 1600);
-  }
-
-  // Clear typing timer on unmount
   useEffect(() => {
-    return () => clearTimeout(typingTimerRef.current);
-  }, []);
-
-  // ---- Resolve previews for message attachments (efficient + safe cleanup) ----
-  const previewsRef = useRef({}); // live map of id -> objectURL for cleanup
-  useEffect(() => {
-    let cancelled = false;
-
-    (async () => {
-      const byId = new Map(mediaIndex.map((m) => [m.id, m]));
-      const allIds = Array.from(
-        new Set(messages.flatMap((m) => Array.isArray(m.mediaIds) ? m.mediaIds : []))
-      );
-
-      // Only fetch URLs we don't already have
-      const needIds = allIds.filter((id) => !previewsRef.current[id]);
-      if (needIds.length === 0) return;
-
-      const entries = await Promise.all(
-        needIds.map(async (id) => {
-          const meta = byId.get(id);
-          if (!meta) return null;
-          const url = await getMediaURL(id); // IndexedDB -> blob -> objectURL
-          return url ? [id, url] : null;
-        })
-      );
-
-      if (cancelled) return;
-
-      const newMap = { ...previewsRef.current };
-      for (const tuple of entries) {
-        if (!tuple) continue;
-        const [id, url] = tuple;
-        newMap[id] = url;
-      }
-      previewsRef.current = newMap;
-      setPreviews(newMap);
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [messages, mediaIndex]);
-
-  // Cleanup all blob URLs on unmount
-  useEffect(() => {
-    return () => {
-      for (const url of Object.values(previewsRef.current)) {
-        try { URL.revokeObjectURL(url); } catch {}
-      }
-      previewsRef.current = {};
-    };
-  }, []);
-
-  // Auto-scroll to bottom on new messages or when opening the panel
-  useEffect(() => {
-    listRef.current?.scrollTo({
-      top: listRef.current.scrollHeight,
-      behavior: "smooth",
-    });
+    if (!open && messages.length > prevMsgCount.current) {
+      const added = messages.length - prevMsgCount.current;
+      setUnreadCount((c) => c + added);
+      setUnreadBounce(true);
+      const t = setTimeout(() => setUnreadBounce(false), 8000);
+      return () => clearTimeout(t);
+    }
+    if (open) {
+      setUnreadCount(0);
+      setUnreadBounce(false);
+    }
+    prevMsgCount.current = messages.length;
   }, [messages.length, open]);
 
-  async function handleSend() {
-    const t = text.trim();
-    if (!t && files.length === 0) return;
+  function handleTextChange(e) {
+    setText(e.target.value);
+    if (onTyping) {
+      onTyping(true);
+      clearTimeout(typingTimerRef.current);
+      typingTimerRef.current = setTimeout(() => onTyping(false), 1400);
+    }
+  }
+  function handleKeyDown(e) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      doSend();
+    }
+  }
+  useEffect(() => () => clearTimeout(typingTimerRef.current), []);
 
-    // Stop typing indicator immediately when sending
-    clearTimeout(typingTimerRef.current);
-    notifyTyping(false);
+  function handlePick(e) {
+    const list = Array.from(e.target.files || []);
+    if (list.length) setFiles((prev) => [...prev, ...list]);
+    e.target.value = "";
+  }
 
-    await onSend?.(t, files);
+  async function doSend() {
+    const val = text.trim();
+    if (!val && files.length === 0) return;
+    await onSend?.(val, files);
     setText("");
     setFiles([]);
-    if (fileRef.current) fileRef.current.value = "";
+  }
+
+  if (docked) {
+    return (
+      <div className="fixed bottom-4 right-4 z-50">
+        {!open && (
+          <button
+            onClick={() => setOpen(true)}
+            className={`flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold shadow-lg ${
+              unreadCount > 0
+                ? `bg-red-600 text-white ${unreadBounce ? "animate-bounce" : ""}`
+                : "bg-gray-900 text-white hover:bg-black"
+            }`}
+            title="Open chat"
+          >
+            💬 Chat
+            {unreadCount > 0 && (
+              <span className="ml-1 rounded-full bg-white px-2 py-0.5 text-xs font-bold text-red-600" aria-live="polite">
+                {unreadCount}
+              </span>
+            )}
+          </button>
+        )}
+
+        {open && (
+          <div className="flex h-[440px] w-[360px] flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b px-3 py-2">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-semibold">Group Chat</span>
+                {typing?.names?.length > 0 && (
+                  <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] text-gray-600">
+                    {typing.names.join(", ")} typing…
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                {files.length > 0 && (
+                  <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[10px] text-blue-700">
+                    {files.length} file{files.length > 1 ? "s" : ""} ready
+                  </span>
+                )}
+                <button
+                  onClick={() => setOpen(false)}
+                  className="rounded-md px-2 py-1 text-xs text-gray-500 hover:bg-gray-100"
+                  title="Minimize"
+                >
+                  ⌄
+                </button>
+              </div>
+            </div>
+
+            <div ref={listRef} className="flex-1 space-y-2 overflow-auto p-3">
+              <MessageList messages={messages} mediaIndex={mediaIndex} me={me} tripId={tripId} />
+            </div>
+
+            <div className="border-t p-2">
+              <div className="flex items-end gap-2">
+                <button
+                  className="rounded-md border px-2 py-1 text-sm hover:bg-gray-50"
+                  onClick={() => fileInputRef.current?.click()}
+                  title="Attach files"
+                >
+                  +
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  className="hidden"
+                  multiple
+                  onChange={handlePick}
+                />
+                <textarea
+                  className="min-h-[38px] max-h-24 flex-1 resize-none rounded-md border p-2 text-sm leading-5"
+                  rows={2}
+                  placeholder="Type a message…"
+                  value={text}
+                  onChange={handleTextChange}
+                  onKeyDown={handleKeyDown}
+                />
+                <button
+                  className="rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-700"
+                  onClick={doSend}
+                >
+                  Send
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
   }
 
   return (
-    <div className={`fixed ${docked ? "bottom-4 right-4" : ""} z-30 w-full max-w-md`}>
-      <div className="tw-tile p-3">
-        <div className="mb-2 flex items-center justify-between">
-          <div className="font-semibold">Group chat</div>
-          <button
-            className="rounded-md border px-2 py-1 text-xs hover:bg-gray-50"
-            onClick={() => setOpen((v) => !v)}
+    <div className="rounded-2xl border border-gray-100 bg-white p-4 shadow-sm">
+      <h3 className="mb-2 text-sm font-semibold">Group Chat</h3>
+      <div ref={listRef} className="mb-2 flex max-h-72 flex-col gap-2 overflow-auto pr-1">
+        <MessageList messages={messages} mediaIndex={mediaIndex} me={me} tripId={tripId} />
+      </div>
+      <div className="flex items-end gap-2">
+        <button
+          className="rounded-md border px-2 py-1 text-sm"
+          onClick={() => fileInputRef.current?.click()}
+          title="Attach files"
+        >
+          +
+        </button>
+        <input ref={fileInputRef} type="file" className="hidden" multiple onChange={handlePick} />
+        <textarea
+          className="flex-1 resize-none rounded-md border p-2 text-sm"
+          rows={2}
+          placeholder="Type a message…"
+          value={text}
+          onChange={handleTextChange}
+          onKeyDown={handleKeyDown}
+        />
+        <button className="rounded-md bg-blue-600 px-3 py-2 text-white text-sm" onClick={doSend}>
+          Send
+        </button>
+      </div>
+      {typing?.names?.length > 0 && (
+        <div className="mt-1 text-[11px] text-gray-500">{typing.names.join(", ")} typing…</div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Message list with grouping ---------------- */
+
+function MessageList({ messages, mediaIndex, me, tripId }) {
+  const GROUP_WINDOW_MS = 5 * 60 * 1000;
+
+  return (
+    <>
+      {messages.map((m, i) => {
+        const prev = i > 0 ? messages[i - 1] : null;
+        const sameSender =
+          !!prev &&
+          ((m.fromUid && prev.fromUid && m.fromUid === prev.fromUid) ||
+            (m.fromShortId && prev.fromShortId && m.fromShortId === prev.fromShortId) ||
+            (m.fromName && prev.fromName && m.fromName === prev.fromName));
+        const closeInTime =
+          !!prev && typeof m.at === "number" && typeof prev.at === "number"
+            ? m.at - prev.at <= GROUP_WINDOW_MS
+            : false;
+
+        const grouped = sameSender && closeInTime;
+
+        return (
+          <MessageItem
+            key={m.id}
+            msg={m}
+            mediaIndex={mediaIndex}
+            me={me}
+            tripId={tripId}
+            grouped={grouped}
+          />
+        );
+      })}
+    </>
+  );
+}
+
+/* ---------------- Building blocks ---------------- */
+
+function Avatar({ src, name }) {
+  const initials =
+    (name || "")
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((s) => s[0]?.toUpperCase())
+      .join("") || "•";
+  return (
+    <div className="grid h-7 w-7 place-items-center overflow-hidden rounded-full bg-gray-100 ring-2 ring-white shadow">
+      {src ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={src} alt={name || "User"} className="h-full w-full object-cover" loading="lazy" />
+      ) : (
+        <span className="text-[10px] font-semibold text-gray-700">{initials}</span>
+      )}
+    </div>
+  );
+}
+
+function MessageItem({ msg, mediaIndex, me, tripId, grouped = false }) {
+  const name = msg.fromName || msg.from || msg.fromShortId || "User";
+  const avatar = msg.fromAvatar || "";
+  const mine = !!me && (msg.fromShortId === me || msg.fromName === me);
+
+  const hasMedia = Array.isArray(msg.mediaIds) && msg.mediaIds.length > 0;
+
+  return (
+    <div className={`flex items-start gap-2 ${mine ? "flex-row-reverse text-right" : ""}`}>
+      {!grouped && <Avatar src={avatar} name={name} />}
+      <div className={`max-w-[78%] ${mine ? "" : ""}`}>
+        {!grouped && <div className="mb-0.5 text-xs font-semibold text-gray-800">{name}</div>}
+        {msg.text && (
+          <div
+            className={`whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm ${
+              mine ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-900"
+            } ${grouped ? "mt-0.5" : ""}`}
           >
-            {open ? "Hide" : "Show"}
-          </button>
-        </div>
-
-        {open && (
-          <>
-            <div
-              ref={listRef}
-              className="mb-2 max-h-64 overflow-auto rounded-lg border border-gray-200 bg-white/70 p-2"
-            >
-              {messages.length === 0 ? (
-                <div className="py-8 text-center text-sm text-gray-500">
-                  No messages yet.
-                </div>
-              ) : (
-                messages.map((m) => (
-                  <div key={m.id} className="mb-3">
-                    <div className="mb-1 text-xs text-gray-500">
-                      <span className="font-semibold">{m.from || "user"}</span>{" "}
-                      <span className="ml-1">
-                        {new Date(m.at).toLocaleTimeString([], {
-                          hour: "2-digit",
-                          minute: "2-digit",
-                        })}
-                      </span>
-                    </div>
-
-                    {m.text && (
-                      <div className="rounded-md bg-gray-100 px-2 py-1 text-sm">
-                        {m.text}
-                      </div>
-                    )}
-
-                    {!!(m.mediaIds || []).length && (
-                      <div className="mt-1 grid grid-cols-3 gap-2">
-                        {(m.mediaIds || []).map((id) => {
-                          const url = previews[id];
-                          const meta = mediaIndex.find((x) => x.id === id);
-                          const major = (meta?.type || "").split("/")[0];
-
-                          return (
-                            <div
-                              key={id}
-                              className="relative overflow-hidden rounded-md border border-gray-200"
-                            >
-                              {major === "image" && url && (
-                                // eslint-disable-next-line @next/next/no-img-element
-                                <img
-                                  src={url}
-                                  alt={meta?.name || id}
-                                  className="h-20 w-full object-cover"
-                                />
-                              )}
-                              {major === "video" && url && (
-                                <video
-                                  className="h-20 w-full object-cover"
-                                  controls
-                                  src={url}
-                                />
-                              )}
-                              {major === "audio" && url && (
-                                <audio className="w-full" controls src={url} />
-                              )}
-                              {!url && (
-                                <div className="p-2 text-xs text-gray-500">
-                                  Attachment
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                ))
-              )}
-            </div>
-
-            {/* typing indicator (others only) */}
-            {typing?.names?.length > 0 && (
-              <div className="mb-1 text-xs text-gray-500">
-                {typing.names.length === 1
-                  ? `${typing.names[0]} is typing…`
-                  : `${typing.names[0]} + ${typing.names.length - 1} are typing…`}
-              </div>
-            )}
-
-            <div className="flex items-center gap-2">
-              <input
-                ref={inputRef}
-                value={text}
-                onChange={handleInputChange}
-                placeholder="Type a message"
-                className="input flex-1"
-              />
-              <input
-                ref={fileRef}
-                type="file"
-                multiple
-                accept="image/*,video/*,audio/*,.mp3,.mp4,.mpeg,.wav,.aac,.heic,.heif,.raw"
-                onChange={(e) => setFiles(Array.from(e.target.files || []))}
-                className="hidden"
-              />
-              <button
-                className="icon-button"
-                onClick={() => fileRef.current?.click()}
-                title="Attach files"
-              >
-                +
-              </button>
-              <button className="btn-primary" onClick={handleSend}>
-                Send
-              </button>
-            </div>
-
-            {!!files.length && (
-              <div className="mt-2 text-xs text-gray-600">
-                {files.length} file{files.length > 1 ? "s" : ""} attached
-              </div>
-            )}
-          </>
+            {msg.text}
+          </div>
+        )}
+        {hasMedia && (
+          <MediaAttachments
+            mediaIds={msg.mediaIds}
+            mediaIndex={mediaIndex}
+            mine={mine}
+            tripId={tripId}
+          />
         )}
       </div>
+    </div>
+  );
+}
+
+function MediaAttachments({ mediaIds = [], mediaIndex = [], mine, tripId }) {
+  const [urls, setUrls] = useState({});
+  const [types, setTypes] = useState({}); // contentType per id
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const urlMap = {};
+      const typeMap = {};
+      for (const id of mediaIds) {
+        // 1) remote URL (group)
+        let url = tripId ? await getTripMediaURL(tripId, id) : null;
+        // 2) fallback to local (solo/legacy)
+        if (!url) url = await getMediaURL(id);
+        urlMap[id] = url || null;
+
+        // Try to figure out the contentType:
+        const localMeta = mediaIndex.find((x) => x.id === id);
+        if (localMeta?.type) {
+          typeMap[id] = (localMeta.type || "").toLowerCase();
+        } else if (tripId) {
+          const md = await getTripMediaMeta(tripId, id);
+          typeMap[id] = (md?.contentType || "").toLowerCase();
+        } else {
+          typeMap[id] = "";
+        }
+      }
+      if (!cancelled) {
+        setUrls(urlMap);
+        setTypes(typeMap);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      Object.values(urls).forEach((u) => {
+        try {
+          if (u && typeof u === "string" && u.startsWith("blob:")) URL.revokeObjectURL(u);
+        } catch {}
+      });
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tripId, mediaIds.join("|"), mediaIndex.length]);
+
+  return (
+    <div className={`mt-1 grid grid-cols-2 gap-2 ${mine ? "justify-items-end" : ""}`}>
+      {mediaIds.map((id) => {
+        const href = urls[id];
+        const type = (types[id] || "").toLowerCase();
+        const isImage = type.startsWith("image/");
+        const isVideo = type.startsWith("video/");
+        return (
+          <div key={id} className="relative">
+            {isImage ? (
+              href ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={href} alt="image" className="h-28 w-full rounded-lg object-cover" />
+              ) : (
+                <Skeleton />
+              )
+            ) : isVideo ? (
+              href ? (
+                <video src={href} className="h-28 w-full rounded-lg object-cover" controls />
+              ) : (
+                <Skeleton />
+              )
+            ) : href ? (
+              <a
+                href={href}
+                target="_blank"
+                rel="noreferrer"
+                className="flex h-28 w-full items-center justify-center rounded-lg border text-xs text-gray-600"
+                title="file"
+              >
+                Open file
+              </a>
+            ) : (
+              <Skeleton />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function Skeleton() {
+  return (
+    <div className="flex h-28 w-full animate-pulse items-center justify-center rounded-lg border bg-gray-50 text-xs text-gray-400">
+      Loading…
     </div>
   );
 }

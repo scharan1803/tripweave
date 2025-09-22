@@ -29,7 +29,7 @@ import TripMediaGallery from "../../components/TripMediaGallery";
 import TripDocsTile from "../../components/TripDocsTile";
 import ExpenseTracker from "../../components/ExpenseTracker";
 import { subscribeChat, sendChatMessage } from "../../lib/chat";
-import { putMediaBlob } from "../../lib/mediaStore";
+import { putMediaBlob, uploadTripMedia } from "../../lib/mediaStore";
 
 const MAX_MEDIA_BYTES = 250 * 1024 * 1024;
 
@@ -401,38 +401,79 @@ export default function TripClient({ id }) {
     }
     const list = Array.from(files || []);
     if (list.length === 0) return [];
-    const already = currentMediaBytes();
-    const incoming = list.reduce((sum, f) => sum + (f.size || 0), 0);
-    if (already + incoming > MAX_MEDIA_BYTES) {
-      const remaining = Math.max(0, MAX_MEDIA_BYTES - already);
-      alert(
-        `Upload blocked: Trip media limit is 250 MB total.\n` +
-          `Current: ${(already / (1024 * 1024)).toFixed(1)} MB\n` +
-          `Incoming: ${(incoming / (1024 * 1024)).toFixed(1)} MB\n` +
-          `Remaining: ${(remaining / (1024 * 1024)).toFixed(1)} MB`
-      );
-      return [];
+
+    // SOLO: keep legacy local IndexedDB + 250 MB total cap
+    if ((trip?.partyType || "solo") === "solo") {
+      const already = currentMediaBytes();
+      const incoming = list.reduce((sum, f) => sum + (f.size || 0), 0);
+      if (already + incoming > MAX_MEDIA_BYTES) {
+        const remaining = Math.max(0, MAX_MEDIA_BYTES - already);
+        alert(
+          `Upload blocked: Trip media limit is 250 MB total.\n` +
+            `Current: ${(already / (1024 * 1024)).toFixed(1)} MB\n` +
+            `Incoming: ${(incoming / (1024 * 1024)).toFixed(1)} MB\n` +
+            `Remaining: ${(remaining / (1024 * 1024)).toFixed(1)} MB`
+        );
+        return [];
+      }
+      const metas = [];
+      for (const f of list) {
+        const mediaId =
+          (crypto?.randomUUID && crypto.randomUUID()) || `${Date.now()}-${Math.random()}`;
+        await putMediaBlob(mediaId, f);
+        metas.push({
+          id: mediaId,
+          name: f.name,
+          type: f.type,
+          size: f.size,
+          createdAt: Date.now(),
+          ownerUid: currentUid,
+          ownerName: profile?.name || profile?.userId || "User",
+          ownerAvatar: profile?.avatar || "",
+        });
+      }
+      const next = structuredClone(trip);
+      next.media = [...(next.media || []), ...metas];
+      persist(next, `Added ${metas.length} media file(s)`);
+      return metas.map((m) => m.id);
     }
+
+    // GROUP: upload to Storage + Firestore index (70 MB per file enforced in helper)
     const metas = [];
     for (const f of list) {
-      const mediaId =
-        (crypto?.randomUUID && crypto.randomUUID()) || `${Date.now()}-${Math.random()}`;
-      await putMediaBlob(mediaId, f);
-      metas.push({
-        id: mediaId,
-        name: f.name,
-        type: f.type,
-        size: f.size,
-        createdAt: Date.now(),
-      });
+      try {
+        const idx = await uploadTripMedia(trip.id, f, {
+          ownerUid: currentUid,
+          ownerName: profile?.name || profile?.userId || "User",
+          ownerAvatar: profile?.avatar || "",
+        });
+        metas.push(idx);
+      } catch (e) {
+        alert(e?.message || "Failed to upload a file.");
+      }
     }
-    const next = structuredClone(trip);
-    next.media = [...(next.media || []), ...metas];
-    persist(next, `Added ${metas.length} media file(s)`);
+    if (metas.length > 0) {
+      // Keep local trip.media history in same shape (for UI compatibility)
+      const next = structuredClone(trip);
+      next.media = [
+        ...(next.media || []),
+        ...metas.map(({ id, name, type, size, createdAt, ownerUid, ownerName, ownerAvatar }) => ({
+          id,
+          name,
+          type,
+          size,
+          createdAt,
+          ownerUid,
+          ownerName,
+          ownerAvatar,
+        })),
+      ];
+      persist(next, `Added ${metas.length} media file(s)`);
+    }
     return metas.map((m) => m.id);
   }
 
-  // chat sending (stable)
+  // chat sending (unchanged schema; now addTripMedia will route correctly)
   const handleChatSend = useCallback(
     async (text, files) => {
       if (!trip?.id || !currentUid) return;
@@ -448,7 +489,7 @@ export default function TripClient({ id }) {
       });
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [trip?.id, currentUid, currentShortId] // addTripMedia is stable enough (inner function)
+    [trip?.id, currentUid, currentShortId, addTripMedia] 
   );
 
   async function handleKick(uid) {
@@ -471,7 +512,6 @@ export default function TripClient({ id }) {
   }
 
   /* ---------------- Presence (typing) ---------------- */
-  // Writer: called by ChatBox (debounced within ChatBox)
   const handleTyping = useCallback(
     async (isTyping) => {
       if (!trip?.id || !currentUid) return;
@@ -500,7 +540,6 @@ export default function TripClient({ id }) {
       presenceUnsubRef.current = null;
     }
     if (!trip?.id) return;
-    // Only listen when I can see the trip
     const canSee = myRole === "owner" || myRole === "editor" || myRole === "viewer";
     if (!canSee) return;
 
@@ -530,7 +569,6 @@ export default function TripClient({ id }) {
         }
       },
       () => {
-        // on error, clear names (but keep meTyping as-is)
         lastPresenceNamesRef.current = "";
         setTypingState((s) => ({ ...s, names: [] }));
       }
@@ -933,14 +971,21 @@ export default function TripClient({ id }) {
               me={currentShortId}
               tripId={trip.id}
               messages={
-                chatMessages.map((m) => ({
-                  id: m.id,
-                  from:
-                    m.fromShortId || (m.fromUid === currentUid ? currentShortId : "user"),
-                  text: m.text || "",
-                  at: m.createdAt?.toMillis ? m.createdAt.toMillis() : m.createdAt || Date.now(),
-                  mediaIds: Array.isArray(m.mediaIds) ? m.mediaIds : [],
-                })) || []
+                (chatMessages || []).map((m) => {
+                  const prof = profiles[m.fromUid] || {};
+                  const fromName = prof.name || m.fromShortId || "User";
+                  const fromAvatar = prof.avatar || "";
+                  return {
+                    id: m.id,
+                    fromUid: m.fromUid,
+                    fromShortId: m.fromShortId,
+                    fromName,
+                    fromAvatar,
+                    text: m.text || "",
+                    at: m.createdAt?.toMillis ? m.createdAt.toMillis() : m.createdAt || Date.now(),
+                    mediaIds: Array.isArray(m.mediaIds) ? m.mediaIds : [],
+                  };
+                })
               }
               mediaIndex={trip.media || []}
               onSend={handleChatSend}
