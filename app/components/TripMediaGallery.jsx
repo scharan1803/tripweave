@@ -2,7 +2,12 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { getMediaURL, getTripMediaURL, subscribeTripMedia } from "../lib/mediaStore";
+import {
+  getMediaURL,
+  getTripMediaURL,
+  subscribeTripMedia,
+  deleteTripMedia,
+} from "../lib/mediaStore";
 
 function AvatarDot({ name = "User", avatar }) {
   if (avatar) {
@@ -32,9 +37,11 @@ function AvatarDot({ name = "User", avatar }) {
 
 export default function TripMediaGallery({
   tripId,
-  media = [], // local history (solo & compatibility)
+  media = [], // legacy/solo: [{id,name,type,size,createdAt, ownerUid?, ownerName?, ownerAvatar?}]
   partyType = "solo",
   onAddMedia, // async (FileList|File[]) => Promise<void>
+  currentUid, // NEW: used to decide delete perms
+  ownerUid,   // NEW: trip owner can delete all
 }) {
   const [urls, setUrls] = useState({}); // { [id]: urlString }
   const [indexRows, setIndexRows] = useState(media); // for group trips, live index
@@ -60,12 +67,8 @@ export default function TripMediaGallery({
         (list || []).map(async (m) => {
           const id = m.id;
           let url = null;
-          if (partyType === "group") {
-            url = await getTripMediaURL(tripId, id);
-          }
-          if (!url) {
-            url = await getMediaURL(id); // solo/local fallback
-          }
+          if (partyType === "group") url = await getTripMediaURL(tripId, id);
+          if (!url) url = await getMediaURL(id); // solo/local fallback
           return [id, url];
         })
       );
@@ -133,10 +136,14 @@ export default function TripMediaGallery({
             const url = urls[m.id];
             const major = (m.type || "").split("/")[0];
             const name = m.ownerName || "User";
+            const canDelete =
+              !!currentUid && (currentUid === ownerUid || currentUid === m.ownerUid);
+
             return (
               <div
                 key={m.id}
                 className="group relative overflow-hidden rounded-xl border border-gray-200 bg-white/70"
+                title={m.name}
               >
                 {major === "image" && url && (
                   // eslint-disable-next-line @next/next/no-img-element
@@ -156,6 +163,27 @@ export default function TripMediaGallery({
                 <div className="absolute left-2 top-2">
                   <AvatarDot name={name} avatar={m.ownerAvatar} />
                 </div>
+
+                {/* Delete (owner: all, participant: own uploads) */}
+                {canDelete && (
+                  <button
+                    onClick={async () => {
+                      const ok = window.confirm(
+                        `Delete “${m.name}”? This will permanently remove the file.`
+                      );
+                      if (!ok) return;
+                      try {
+                        await deleteTripMedia(tripId, m.id);
+                      } catch (e) {
+                        alert("Failed to delete. You may not have permission.");
+                      }
+                    }}
+                    title="Delete media"
+                    className="absolute right-2 top-2 hidden rounded-full bg-red-600/90 px-2 py-1 text-[10px] font-bold text-white hover:bg-red-700 group-hover:block"
+                  >
+                    Delete
+                  </button>
+                )}
 
                 <div className="truncate p-2 text-xs text-gray-600">{m.name}</div>
               </div>

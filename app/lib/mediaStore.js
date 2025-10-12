@@ -1,34 +1,37 @@
 // app/lib/mediaStore.js
 // Hybrid media store:
-// - Solo trips: keep blobs in IndexedDB (as before)
+// - Solo trips: keep blobs in IndexedDB (local-only previews)
 // - Group trips: upload to Firebase Storage and index in Firestore
 //
 // Exports:
-//   putMediaBlob, getMediaBlob, getMediaURL, deleteMediaBlob   (solo/local)
+//   putMediaBlob, getMediaBlob, getMediaURL, deleteMediaBlob (solo/local)
 //   uploadTripMedia(tripId, file, ownerInfo)
 //   getTripMediaURL(tripId, mediaId)
 //   getTripMediaMeta(tripId, mediaId)
 //   subscribeTripMedia(tripId, callback)
 //   deleteTripMedia(tripId, mediaId)
-
+//   MAX_FILE_BYTES
+import { storage, db } from "./firebaseClient";
 import {
-  getStorage,
   ref,
   uploadBytes,
   getDownloadURL,
   deleteObject,
   getMetadata,
+  setMaxUploadRetryTime,
 } from "firebase/storage";
-import { db } from "./firebaseClient";
 import {
   doc,
   setDoc,
+  deleteDoc,
   serverTimestamp,
   onSnapshot,
   collection,
   orderBy,
   query,
 } from "firebase/firestore";
+
+console.log("[TW] bucket:", storage.app.options.storageBucket);
 
 /* ---------------- IndexedDB (solo/local) ---------------- */
 
@@ -86,7 +89,6 @@ export async function deleteMediaBlob(mediaId) {
 
 /* ---------------- Firebase (group/remote) ---------------- */
 
-const storage = getStorage(); // default app
 export const MAX_FILE_BYTES = 70 * 1024 * 1024;
 
 function pathFor(tripId, mediaId) {
@@ -96,6 +98,8 @@ function pathFor(tripId, mediaId) {
 /**
  * Upload a file to Storage and write its index doc under:
  *   trips/{tripId}/mediaIndex/{mediaId}
+ *
+ * Sets Storage customMetadata.ownerUid so Storage rules can enforce "uploader can delete".
  *
  * @param {string} tripId
  * @param {File|Blob} file
@@ -111,18 +115,24 @@ export async function uploadTripMedia(tripId, file, owner = {}) {
   const fullPath = pathFor(tripId, mediaId);
   const objectRef = ref(storage, fullPath);
 
-  // Upload binary
-  await uploadBytes(objectRef, file);
+  // Upload binary with metadata for deletion enforcement
+  await uploadBytes(objectRef, file, {
+    contentType: file.type || "application/octet-stream",
+    customMetadata: {
+      ownerUid: owner.ownerUid || "",
+      ownerName: owner.ownerName || "",
+    },
+  });
 
-  // Optional convenience URL (may fail if rules block read)
+  // Optional convenience URL (may be null if read blocked)
   let downloadURL = null;
   try {
     downloadURL = await getDownloadURL(objectRef);
   } catch {
-    // ok to ignore; Chat/Gallery will resolve when needed
+    // ok to ignore; URL can be resolved lazily later
   }
 
-  // Firestore index row
+  // Firestore index row (mirrors Storage object + owner info)
   const index = {
     id: mediaId,
     name: file.name || "file",
@@ -198,19 +208,14 @@ export function subscribeTripMedia(tripId, callback) {
 }
 
 /**
- * Delete the remote object and soft-delete the index row.
- * (Used in Stage 3 with permissions; safe to call now but not exposed yet.)
+ * HARD delete: remove the Storage object, then remove the Firestore index doc.
+ * (Relies on rules to ensure caller is owner OR uploader.)
  */
 export async function deleteTripMedia(tripId, mediaId) {
   if (!tripId || !mediaId) return;
-  try {
-    await deleteObject(ref(storage, pathFor(tripId, mediaId)));
-  } catch {
-    // ignore; might not exist / already deleted
-  }
-  await setDoc(
-    doc(db, "trips", tripId, "mediaIndex", mediaId),
-    { deleted: true, deletedAt: serverTimestamp() },
-    { merge: true }
-  );
+  const objectRef = ref(storage, pathFor(tripId, mediaId));
+  // 1) delete Storage object (rules enforce permissions)
+  await deleteObject(objectRef);
+  // 2) delete Firestore index doc (hard delete)
+  await deleteDoc(doc(db, "trips", tripId, "mediaIndex", mediaId));
 }

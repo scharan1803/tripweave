@@ -778,6 +778,8 @@ export default function TripClient({ id }) {
                 media={trip.media || []}
                 partyType={trip.partyType || "solo"}
                 onAddMedia={addTripMedia}
+                currentUid={user?.uid}      // NEW
+                ownerUid={trip.ownerUid}    // NEW
               />
             </div>
           </section>
