@@ -1,113 +1,106 @@
 // app/components/UserMenu.jsx
 "use client";
 
-import { useRouter } from "next/navigation";
+import { useState } from "react";
+import Link from "next/link";
 import { useAuth } from "../context/AuthProvider";
-import { useEffect, useState } from "react";
-import { db } from "../lib/firebaseClient";
-import { doc, getDoc } from "firebase/firestore";
 
 export default function UserMenu() {
-  const router = useRouter();
-  const { user, loading, signInWithGoogle, signOut } = useAuth();
-  const [shortId, setShortId] = useState("");
+  const { user, profile, verified, signOut, sendVerifyEmail } = useAuth?.() ?? {};
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [err, setErr] = useState("");
 
-  useEffect(() => {
-    async function fetchUserId() {
-      if (!user) {
-        setShortId("");
-        return;
-      }
-      try {
-        const ref = doc(db, "users", user.uid);
-        const snap = await getDoc(ref);
-        if (snap.exists()) {
-          setShortId(snap.data().userId || "");
-        }
-      } catch (e) {
-        console.warn("Failed to fetch short userId:", e);
-      }
-    }
-    fetchUserId();
-  }, [user]);
+  if (!user) return null;
 
-  const handleSignIn = async () => {
+  const name =
+    profile?.name ||
+    user.displayName ||
+    (profile?.email ? profile.email.split("@")[0] : "You");
+  const shortId = profile?.userId || ""; // your 7-char participant id
+
+  async function handleResend() {
+    setErr("");
+    setMsg("");
+    setBusy(true);
     try {
-      await signInWithGoogle();
+      await sendVerifyEmail();
+      setMsg("Verification email sent. Check your inbox.");
     } catch (e) {
-      console.error("Sign-in failed:", e);
-      alert("Sign-in failed. Please try again.");
-    }
-  };
-
-  const handleSignOut = async () => {
-    try {
-      await signOut();
-    } catch (e) {
-      console.error("Sign-out failed:", e);
+      setErr(e?.message || "Could not send verification email.");
     } finally {
-      window.location.href = "/";
+      setBusy(false);
     }
-  };
-
-  const goToDashboard = () => {
-    if (user) router.push("/dashboard");
-  };
-
-  if (loading) {
-    return <div className="text-xs text-gray-500">Checking auth…</div>;
   }
-
-  if (!user) {
-    return (
-      <button
-        onClick={handleSignIn}
-        className="rounded-sm bg-gray-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-black"
-      >
-        Sign in with Google
-      </button>
-    );
-  }
-
-  const name = user.displayName || user.email;
-  const photo = user.photoURL;
 
   return (
-    <div className="flex items-center gap-3">
-      <button
-        onClick={goToDashboard}
-        title="Open Dashboard"
-        className="group flex items-center gap-2"
-        aria-label="Open Dashboard"
-      >
-        {photo ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={photo}
-            alt={name}
-            className="h-8 w-8 rounded-full ring-1 ring-gray-200 group-hover:ring-gray-300 transition"
-          />
-        ) : (
-          <div className="grid h-8 w-8 place-items-center rounded-full bg-gray-200 text-xs font-semibold">
-            {name?.[0]?.toUpperCase() || "U"}
-          </div>
-        )}
-        <span className="hidden sm:inline text-sm text-gray-700 group-hover:text-gray-900">
-          {name}
-        </span>
-        {shortId && (
-          <span className="ml-2 text-xs rounded bg-gray-100 px-2 py-0.5 font-mono text-gray-600">
-            {shortId}
-          </span>
-        )}
-      </button>
+    <div className="relative">
+      {/* Trigger */}
+      <details className="group">
+        <summary className="flex cursor-pointer list-none items-center gap-2 rounded-full border px-3 py-1.5 hover:bg-gray-50">
+          <div className="h-6 w-6 overflow-hidden rounded-full bg-gradient-to-br from-gray-200 to-gray-300" />
+          <span className="text-sm font-medium">{name}</span>
+          {shortId && (
+            <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[11px] font-mono text-gray-700">
+              {shortId}
+            </span>
+          )}
+        </summary>
 
-      <button
-        onClick={handleSignOut}
-        className="rounded-lg border border-gray-300 px-2 py-1 text-xs hover:bg-gray-50"
-      >
-        Sign out
-      </button>
+        {/* Menu */}
+        <div className="absolute right-0 mt-2 w-64 rounded-xl border bg-white p-3 shadow-lg">
+          {/* Unverified banner */}
+          {!verified && (
+            <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 p-2">
+              <p className="text-xs font-medium text-amber-800">
+                Email not verified
+              </p>
+              <p className="mt-1 text-xs text-amber-700">
+                Some features (invites, uploads) may be limited.
+              </p>
+              <button
+                onClick={handleResend}
+                disabled={busy}
+                className="mt-2 w-full rounded-md border px-2 py-1 text-xs font-medium hover:bg-amber-100 disabled:opacity-60"
+              >
+                {busy ? "Sending…" : "Resend verification email"}
+              </button>
+              {msg && <p className="mt-1 text-[11px] text-green-700">{msg}</p>}
+              {err && <p className="mt-1 text-[11px] text-red-600">{err}</p>}
+            </div>
+          )}
+
+          <div className="space-y-1">
+            <Link
+              href="/dashboard"
+              className="block rounded-md px-2 py-1.5 text-sm hover:bg-gray-50"
+            >
+              Dashboard
+            </Link>
+            <Link
+              href="/trip/new"
+              className="block rounded-md px-2 py-1.5 text-sm hover:bg-gray-50"
+            >
+              Plan a trip
+            </Link>
+          </div>
+
+          <div className="my-2 h-px bg-gray-200" />
+
+          <div className="space-y-1">
+            <div className="px-2 py-1.5 text-xs text-gray-500">
+              Signed in as
+              <div className="truncate text-sm text-gray-700">{user.email}</div>
+            </div>
+            <button
+              onClick={signOut}
+              className="w-full rounded-md border px-2 py-1.5 text-sm font-medium hover:bg-gray-50"
+            >
+              Sign out
+            </button>
+          </div>
+        </div>
+      </details>
     </div>
   );
 }

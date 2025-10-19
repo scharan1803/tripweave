@@ -14,7 +14,8 @@ async function fetchAutocompleteNew(input) {
       headers: {
         "Content-Type": "application/json",
         "X-Goog-Api-Key": GMAPS_KEY,
-        "X-Goog-FieldMask": "suggestions.placePrediction.placeId,suggestions.placePrediction.text",
+        "X-Goog-FieldMask":
+          "suggestions.placePrediction.placeId,suggestions.placePrediction.text",
       },
       body: JSON.stringify({ input: input.trim() }),
     });
@@ -33,7 +34,9 @@ async function fetchAutocompleteNew(input) {
           [
             p?.structuredFormat?.mainText?.text,
             p?.structuredFormat?.secondaryText?.text,
-          ].filter(Boolean).join(", ") ||
+          ]
+            .filter(Boolean)
+            .join(", ") ||
           "",
       }))
       .filter((x) => x.description);
@@ -99,7 +102,10 @@ export default function HomePage() {
 
   return (
     <main className="mx-auto max-w-xl py-20 px-4">
-      <h1 className="text-2xl font-semibold mb-6 text-center">Where do you want to go?</h1>
+      <h1 className="mb-6 text-center text-2xl font-semibold">
+        Where do you want to go?
+      </h1>
+
       <div ref={wrapRef} className="relative flex items-center gap-2">
         <div className="relative flex-1">
           <input
@@ -121,7 +127,9 @@ export default function HomePage() {
           )}
           {(open || loading) && (
             <div className="absolute z-20 mt-1 w-full rounded-lg border border-gray-200 bg-white shadow">
-              {loading && <div className="px-3 py-2 text-sm text-gray-500">Loading…</div>}
+              {loading && (
+                <div className="px-3 py-2 text-sm text-gray-500">Loading…</div>
+              )}
               {!loading &&
                 preds.map((p) => (
                   <div
@@ -136,7 +144,9 @@ export default function HomePage() {
                   </div>
                 ))}
               {!loading && preds.length === 0 && (
-                <div className="px-3 py-2 text-sm text-gray-400">No suggestions</div>
+                <div className="px-3 py-2 text-sm text-gray-400">
+                  No suggestions
+                </div>
               )}
             </div>
           )}
