@@ -1,0 +1,1222 @@
+// app/trip/[id]/album/page.jsx
+"use client";
+
+import {
+  useEffect,
+  useMemo,
+  useState,
+  useCallback,
+  useRef,
+} from "react";
+import { createPortal } from "react-dom";
+import { useParams } from "next/navigation";
+import {
+  doc,
+  onSnapshot,
+  updateDoc,
+  arrayUnion,
+  serverTimestamp,
+  collection,
+  setDoc,
+} from "firebase/firestore";
+
+import { useAuth } from "../../../context/AuthProvider";
+import { db } from "../../../lib/firebaseClient";
+import {
+  getTripMediaURL,
+  getMediaURL,
+  uploadTripMedia,
+  putMediaBlob,
+  subscribeTripMedia,
+  deleteTripMedia,
+  deleteMediaBlob,
+  MAX_FILE_BYTES,
+} from "../../../lib/mediaStore";
+
+import ChatBox from "../../../components/ChatBox";
+import { subscribeChat, sendChatMessage } from "../../../lib/chat";
+
+/* ----------------------- small helpers ----------------------- */
+function uuid() {
+  return (crypto?.randomUUID && crypto.randomUUID()) || `${Date.now()}-${Math.random()}`;
+}
+
+async function resolveMediaURL(tripId, item) {
+  try {
+    if (tripId && item?.id) {
+      const u = await getTripMediaURL(tripId, item.id);
+      if (u) return u;
+    }
+  } catch {}
+  try {
+    if (item?.id) {
+      const u2 = await getMediaURL(item.id);
+      if (u2) return u2;
+    }
+  } catch {}
+  return "";
+}
+
+// parse search tokens: #tag @uploader type:image|video free text
+function parseQuery(q) {
+  const tokens = (q || "").trim().split(/\s+/).filter(Boolean);
+  const tags = [];
+  const uploaders = [];
+  let type = null;
+  const text = [];
+  for (const t of tokens) {
+    if (t.startsWith("#")) tags.push(t.slice(1).toLowerCase());
+    else if (t.startsWith("@")) uploaders.push(t.slice(1).toLowerCase());
+    else if (t.toLowerCase().startsWith("type:")) {
+      const v = t.split(":")[1]?.toLowerCase();
+      if (v === "image" || v === "video") type = v;
+    } else text.push(t.toLowerCase());
+  }
+  return { tags, uploaders, type, text: text.join(" ") };
+}
+
+/* ---------- Portal wrapper so ChatBox sits above overlays ---------- */
+function PortalChat({ children }) {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+  if (!mounted) return null;
+  return createPortal(children, document.body);
+}
+
+/* ======================= PAGE ======================= */
+
+export default function AlbumPage() {
+  const { id: rawId } = useParams();
+  const tripId = Array.isArray(rawId) ? rawId[0] : rawId;
+
+  const { user, profile, loading } = useAuth();
+  const currentUid = user?.uid || "";
+  const currentName = profile?.name || profile?.userId || "User";
+  const currentAvatar = profile?.avatar || "";
+
+  const [trip, setTrip] = useState(null);
+
+  // media + urls
+  const [mediaList, setMediaList] = useState([]);
+  const [urls, setUrls] = useState({});
+
+  // viewer state
+  const [viewerIdx, setViewerIdx] = useState(-1);
+  const [zoom, setZoom] = useState(1);
+
+  // search
+  const [query, setQuery] = useState("");
+  const parsed = useMemo(() => parseQuery(query), [query]);
+
+  // selection / threads
+  const [selected, setSelected] = useState(() => new Set());
+  const [showThreadPrompt, setShowThreadPrompt] = useState(false);
+  const [threadName, setThreadName] = useState("");
+
+  // editing
+  const [isEditing, setIsEditing] = useState(false);
+  const [editOpen, setEditOpen] = useState(false); // dropdown visibility
+  const [editRotate, setEditRotate] = useState(0);
+  const [editContrast, setEditContrast] = useState(1);
+  const [cropSel, setCropSel] = useState(null); // {x,y,w,h} in stage pixels
+  const stageRef = useRef(null);
+  const dragRef = useRef({ dragging: false, startX: 0, startY: 0 });
+
+  const fileInputRef = useRef(null);
+
+  // chat
+  const [chatMessages, setChatMessages] = useState([]);
+  const chatUnsubRef = useRef(null);
+  const [typingState, setTypingState] = useState({ names: [], meTyping: false });
+  const presenceUnsubRef = useRef(null);
+  const lastPresenceNamesRef = useRef("");
+
+  /* ---------- trip snapshot ---------- */
+  useEffect(() => {
+    if (!tripId) return;
+    const ref = doc(db, "trips", tripId);
+    return onSnapshot(ref, (snap) => {
+      const d = snap.data();
+      if (!d) return;
+      const participantsMap =
+        (d.participants && typeof d.participants === "object" && d.participants) ||
+        (d.participantsMap && typeof d.participantsMap === "object" && d.participantsMap) ||
+        {};
+      setTrip((prev) => ({
+        ...(prev || {}),
+        id: tripId,
+        ...d,
+        participantsMap,
+        media: Array.isArray(d.media) ? d.media : prev?.media || [],
+        albums: Array.isArray(d.albums) ? d.albums : [],
+        mediaTags: typeof d.mediaTags === "object" && d.mediaTags ? d.mediaTags : {},
+      }));
+    });
+  }, [tripId]);
+
+  const isGroup = useMemo(() => {
+    if (!trip) return false;
+    const count = 1 + Object.keys(trip.participantsMap || {}).filter(Boolean).length;
+    return (trip.partyType || "solo") === "group" || count > 1;
+  }, [trip]);
+
+  /* ---------- live media feed ---------- */
+  useEffect(() => {
+    if (!trip?.id) return;
+    let unsub = null;
+    if (isGroup) {
+      unsub = subscribeTripMedia(trip.id, (items) => {
+        setMediaList(
+          (items || []).map((it) => ({
+            id: it.id,
+            name: it.name || "Media",
+            type: it.type || "",
+            size: it.size || 0,
+            createdAt: it.createdAtServer?.toMillis?.() || Date.now(),
+            ownerUid: it.ownerUid || "",
+            ownerName: it.ownerName || "User",
+            ownerAvatar: it.ownerAvatar || "",
+          }))
+        );
+      });
+    } else {
+      setMediaList(
+        (Array.isArray(trip.media) ? trip.media : []).map((m) => ({
+          id: m.id,
+          name: m.name || "Media",
+          type: m.type || "",
+          size: m.size || 0,
+          createdAt: m.createdAt || Date.now(),
+          ownerUid: m.ownerUid || currentUid,
+          ownerName: m.ownerName || currentName,
+          ownerAvatar: m.ownerAvatar || currentAvatar,
+        }))
+      );
+    }
+    return () => unsub && unsub();
+  }, [trip?.id, isGroup, (trip?.media || []).length, currentUid, currentName, currentAvatar]);
+
+  /* ---------- signed/local URLs ---------- */
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!trip?.id || mediaList.length === 0) return;
+      const pairs = await Promise.all(
+        mediaList.map(async (m) => [m.id, await resolveMediaURL(trip.id, m)])
+      );
+      if (!cancelled) {
+        const next = {};
+        for (const [id, url] of pairs) if (id && url) next[id] = url;
+        setUrls((prev) => ({ ...prev, ...next }));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [trip?.id, mediaList.map((m) => m.id).join("|")]);
+
+  /* ---------- merge tags & filter ---------- */
+  const allTags = useMemo(() => {
+    const bag = new Set();
+    Object.values(trip?.mediaTags || {}).forEach((arr) =>
+      (arr || []).forEach((t) => bag.add((t || "").toLowerCase()))
+    );
+    return Array.from(bag);
+  }, [trip?.mediaTags]);
+
+  const baseShown = useMemo(() => {
+    const tmap = trip?.mediaTags || {};
+    return mediaList
+      .map((m) => ({ ...m, tags: Array.isArray(tmap[m.id]) ? tmap[m.id] : [] }))
+      .filter((m) => {
+        const t = (m.type || "").toLowerCase();
+        return t.startsWith("image/") || t.startsWith("video/");
+      });
+  }, [mediaList, trip?.mediaTags]);
+
+  const filtered = useMemo(() => {
+    const { tags, uploaders, type, text } = parsed;
+    return baseShown.filter((m) => {
+      if (type === "image" && !m.type.toLowerCase().startsWith("image/")) return false;
+      if (type === "video" && !m.type.toLowerCase().startsWith("video/")) return false;
+      if (tags.length) {
+        const mt = (m.tags || []).map((t) => (t || "").toLowerCase());
+        if (!tags.every((t) => mt.includes(t))) return false;
+      }
+      if (uploaders.length) {
+        const low = `${(m.ownerName || "").toLowerCase()} ${(m.ownerUid || "").toLowerCase()}`;
+        if (!uploaders.every((u) => low.includes(u))) return false;
+      }
+      if (text && !(m.name || "").toLowerCase().includes(text)) return false;
+      return true;
+    });
+  }, [baseShown, parsed]);
+
+  // chips from parsed
+  const chips = useMemo(() => {
+    const arr = [];
+    parsed.tags.forEach((t) => arr.push(`#${t}`));
+    parsed.uploaders.forEach((u) => arr.push(`@${u}`));
+    if (parsed.type) arr.push(`type:${parsed.type}`);
+    if (parsed.text) arr.push(parsed.text);
+    return arr;
+  }, [parsed]);
+
+  const removeChip = (label) => {
+    const parts = (query || "").trim().split(/\s+/).filter(Boolean);
+    const idx = parts.findIndex((p) => p.toLowerCase() === label.toLowerCase());
+    if (idx >= 0) {
+      parts.splice(idx, 1);
+      setQuery(parts.join(" "));
+    }
+  };
+
+  /* ---------- add media (also used by chat uploads) ---------- */
+  const handlePickFiles = useCallback(() => fileInputRef.current?.click(), []);
+  const addTripMedia = useCallback(
+    async (filesOrList) => {
+      const files = Array.isArray(filesOrList) ? filesOrList : Array.from(filesOrList || []);
+      if (!files.length || !trip) return [];
+
+      const tooBig = files.find((f) => (f.size || 0) > MAX_FILE_BYTES);
+      if (tooBig) {
+        alert(
+          `“${tooBig.name}” is too large. Max file size is ${(MAX_FILE_BYTES / (1024 * 1024)).toFixed(
+            0
+          )} MB.`
+        );
+        return [];
+      }
+
+      if (isGroup) {
+        const ids = [];
+        for (const f of files) {
+          try {
+            const idx = await uploadTripMedia(trip.id, f, {
+              ownerUid: currentUid,
+              ownerName: currentName,
+              ownerAvatar: currentAvatar,
+            });
+            ids.push(idx.id);
+          } catch (err) {
+            alert(err?.message || "Failed to upload a file.");
+          }
+        }
+        return ids;
+      } else {
+        const metas = [];
+        for (const f of files) {
+          const mid = uuid();
+          await putMediaBlob(mid, f);
+          metas.push({
+            id: mid,
+            name: f.name,
+            type: f.type,
+            size: f.size,
+            createdAt: Date.now(),
+            ownerUid: currentUid,
+            ownerName: currentName,
+            ownerAvatar: currentAvatar,
+          });
+        }
+        try {
+          await updateDoc(doc(db, "trips", trip.id), {
+            media: [...(trip.media || []), ...metas],
+          });
+        } catch {
+          setTrip((prev) => ({ ...prev, media: [...(prev?.media || []), ...metas] }));
+        }
+        return metas.map((m) => m.id);
+      }
+    },
+    [trip, isGroup, currentUid, currentName, currentAvatar]
+  );
+
+  const handleFiles = useCallback(
+    async (e) => {
+      const ids = await addTripMedia(e.target.files);
+      e.target.value = "";
+      return ids;
+    },
+    [addTripMedia]
+  );
+
+  /* ---------- delete / tag ---------- */
+  const canDelete = useCallback(
+    (m) => currentUid && (currentUid === trip?.ownerUid || currentUid === (m?.ownerUid || "")),
+    [currentUid, trip?.ownerUid]
+  );
+
+  const handleDelete = useCallback(
+    async (m) => {
+      if (!m?.id || !trip?.id) return;
+      if (!canDelete(m)) return alert("You don’t have permission to delete this.");
+      const ok = window.confirm(`Delete “${m.name || "media"}”? This will permanently remove it.`);
+      if (!ok) return;
+
+      // optimistic
+      setMediaList((prev) => prev.filter((x) => x.id !== m.id));
+      setUrls((prev) => {
+        const n = { ...prev };
+        delete n[m.id];
+        return n;
+      });
+
+      try {
+        if (isGroup) {
+          await deleteTripMedia(trip.id, m.id);
+        } else {
+          await deleteMediaBlob(m.id);
+          try {
+            const nextArr = (trip.media || []).filter((x) => x.id !== m.id);
+            await updateDoc(doc(db, "trips", trip.id), { media: nextArr });
+          } catch {
+            setTrip((prev) => ({ ...prev, media: (prev?.media || []).filter((x) => x.id !== m.id) }));
+          }
+        }
+      } catch (e) {
+        alert(e?.message || "Failed to delete.");
+      }
+    },
+    [trip?.id, trip?.media, isGroup, canDelete]
+  );
+
+  const canTag = useCallback(
+    (m) => currentUid && (currentUid === trip?.ownerUid || currentUid === (m?.ownerUid || "")),
+    [currentUid, trip?.ownerUid]
+  );
+
+  const editTags = useCallback(
+    async (m) => {
+      if (!m?.id) return;
+      if (!canTag(m)) return alert("You don’t have permission to tag this.");
+      const current = (Array.isArray(trip?.mediaTags?.[m.id]) ? trip.mediaTags[m.id] : []).join(", ");
+      const input = window.prompt("Tags (comma separated):", current);
+      if (input == null) return;
+      const tags = input.split(",").map((s) => s.trim()).filter(Boolean);
+
+      // optimistic UI
+      const newMap = { ...(trip?.mediaTags || {}) };
+      newMap[m.id] = tags;
+      setTrip((prev) => ({ ...prev, mediaTags: newMap }));
+
+      try {
+        await updateDoc(doc(db, "trips", trip.id), { [`mediaTags.${m.id}`]: tags });
+      } catch (e) {
+        alert(e?.message || "Failed to save tags.");
+      }
+    },
+    [trip?.id, trip?.mediaTags, canTag]
+  );
+
+  /* ---------- viewer open/close ---------- */
+  const openViewer = useCallback(
+    (idx) => {
+      const m = filtered[idx];
+      if (!m) return;
+      const url = urls[m.id];
+      if (!url) return;
+      setViewerIdx(idx);
+      setZoom(1);
+      setIsEditing(false);
+      setEditOpen(false);
+      setCropSel(null);
+      setEditRotate(0);
+      setEditContrast(1);
+      document.body.style.overflow = "hidden";
+    },
+    [filtered, urls]
+  );
+
+  const closeViewer = useCallback(() => {
+    setViewerIdx(-1);
+    setZoom(1);
+    setIsEditing(false);
+    setEditOpen(false);
+    setCropSel(null);
+    document.body.style.overflow = "";
+  }, []);
+
+  const editingItem = viewerIdx >= 0 ? filtered[viewerIdx] : null;
+  const editingUrl = editingItem ? urls[editingItem.id] : null;
+  const isVideo = editingItem ? (editingItem.type || "").toLowerCase().startsWith("video/") : false;
+
+  /* ---------- crop gesture when editing ---------- */
+  useEffect(() => {
+    if (!isEditing) return;
+    const stage = stageRef.current;
+    if (!stage) return;
+
+    function onDown(e) {
+      const rect = stage.getBoundingClientRect();
+      const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
+      const y = (e.touches ? e.touches[0].clientY : e.clientY) - rect.top;
+      dragRef.current = { dragging: true, startX: x, startY: y };
+      setCropSel({ x, y, w: 0, h: 0 });
+    }
+    function onMove(e) {
+      if (!dragRef.current.dragging) return;
+      const rect = stage.getBoundingClientRect();
+      const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
+      const y = (e.touches ? e.touches[0].clientY : e.clientY) - rect.top;
+      const { startX, startY } = dragRef.current;
+      setCropSel({
+        x: Math.min(startX, x),
+        y: Math.min(startY, y),
+        w: Math.abs(x - startX),
+        h: Math.abs(y - startY),
+      });
+    }
+    function onUp() {
+      dragRef.current.dragging = false;
+    }
+
+    stage.addEventListener("mousedown", onDown);
+    stage.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    stage.addEventListener("touchstart", onDown, { passive: true });
+    stage.addEventListener("touchmove", onMove, { passive: true });
+    window.addEventListener("touchend", onUp);
+
+    return () => {
+      stage.removeEventListener("mousedown", onDown);
+      stage.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      stage.removeEventListener("touchstart", onDown);
+      stage.removeEventListener("touchmove", onMove);
+      window.removeEventListener("touchend", onUp);
+    };
+  }, [isEditing]);
+
+  /* ---------- save edited copy ---------- */
+  async function saveEditedCopy() {
+    if (!editingItem || !editingUrl || isVideo) return;
+
+    // load image
+    const img = await new Promise((resolve, reject) => {
+      const el = new Image();
+      el.crossOrigin = "anonymous";
+      el.onload = () => resolve(el);
+      el.onerror = reject;
+      el.src = editingUrl;
+    });
+
+    // crop in source pixels
+    let sx = 0,
+      sy = 0,
+      sw = img.naturalWidth,
+      sh = img.naturalHeight;
+    if (cropSel && cropSel.w > 10 && cropSel.h > 10 && stageRef.current) {
+      const display = stageRef.current.getBoundingClientRect();
+      const scaleX = img.naturalWidth / display.width;
+      const scaleY = img.naturalHeight / display.height;
+      sx = Math.max(0, Math.round(cropSel.x * scaleX));
+      sy = Math.max(0, Math.round(cropSel.y * scaleY));
+      sw = Math.max(1, Math.round(cropSel.w * scaleX));
+      sh = Math.max(1, Math.round(cropSel.h * scaleY));
+      sw = Math.min(sw, img.naturalWidth - sx);
+      sh = Math.min(sh, img.naturalHeight - sy);
+    }
+
+    const rad = (editRotate * Math.PI) / 180;
+    const needRotate = Math.abs((editRotate % 360 + 360) % 360) > 0.1;
+
+    // step 1: crop
+    const cropCanvas = document.createElement("canvas");
+    cropCanvas.width = sw;
+    cropCanvas.height = sh;
+    const cctx = cropCanvas.getContext("2d");
+    cctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+
+    // step 2: rotate + contrast
+    let outW = sw,
+      outH = sh;
+    if (needRotate) {
+      const s = Math.sin(rad),
+        c = Math.cos(rad);
+      outW = Math.abs(sw * c) + Math.abs(sh * s);
+      outH = Math.abs(sw * s) + Math.abs(sh * c);
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(outW);
+    canvas.height = Math.round(outH);
+    const ctx = canvas.getContext("2d");
+    ctx.save();
+    ctx.translate(canvas.width / 2, canvas.height / 2);
+    ctx.rotate(rad);
+    ctx.filter = `contrast(${editContrast.toFixed(2)})`;
+    ctx.drawImage(cropCanvas, -sw / 2, -sh / 2);
+    ctx.restore();
+
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.95));
+    if (!blob) return alert("Could not render edited image.");
+
+    const newName =
+      (editingItem.name || "image").replace(/\.(heic|heif|png|webp|gif|jpeg|jpg)$/i, "") +
+      "-edited.jpg";
+
+    if (isGroup) {
+      // Upload; tags copy for group omitted (we don't have the new id here).
+      try {
+        await uploadTripMedia(
+          trip.id,
+          new File([blob], newName, { type: "image/jpeg" }),
+          {
+            ownerUid: currentUid,
+            ownerName: currentName,
+            ownerAvatar: currentAvatar,
+          }
+        );
+      } catch (e) {
+        alert("Upload failed for edited copy.");
+      }
+    } else {
+      // solo: save locally + update trip doc, copy tags
+      const mid = uuid();
+      await putMediaBlob(mid, new File([blob], newName, { type: "image/jpeg" }));
+      const meta = {
+        id: mid,
+        name: newName,
+        type: "image/jpeg",
+        size: blob.size,
+        createdAt: Date.now(),
+        ownerUid: currentUid,
+        ownerName: currentName,
+        ownerAvatar: currentAvatar,
+      };
+      try {
+        await updateDoc(doc(db, "trips", trip.id), {
+          media: [...(trip.media || []), meta],
+          ...(trip?.mediaTags?.[editingItem.id]
+            ? { [`mediaTags.${mid}`]: trip.mediaTags[editingItem.id] }
+            : {}),
+        });
+      } catch {
+        setTrip((prev) => ({ ...prev, media: [...(prev?.media || []), meta] }));
+      }
+    }
+
+    // done
+    setIsEditing(false);
+    setEditOpen(false);
+    setCropSel(null);
+  }
+
+  /* ---------- selection ---------- */
+  const toggleSelect = useCallback((id) => {
+    setSelected((prev) => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  }, []);
+  const clearSelection = useCallback(() => setSelected(new Set()), []);
+
+  /* ---------- chat: subscribe, presence, send ---------- */
+  useEffect(() => {
+    if (chatUnsubRef.current) {
+      chatUnsubRef.current();
+      chatUnsubRef.current = null;
+    }
+    if (!tripId) return;
+    chatUnsubRef.current = subscribeChat(tripId, (msgs) => setChatMessages(msgs || []));
+    return () => {
+      if (chatUnsubRef.current) chatUnsubRef.current();
+      chatUnsubRef.current = null;
+    };
+  }, [tripId]);
+
+  const handleTyping = useCallback(
+    async (isTyping) => {
+      if (!tripId || !currentUid) return;
+      setTypingState((s) => (s.meTyping === isTyping ? s : { ...s, meTyping: isTyping }));
+      try {
+        await setDoc(
+          doc(db, "trips", tripId, "presence", currentUid),
+          {
+            isTyping: !!isTyping,
+            who: profile?.userId || user?.uid || "user",
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+      } catch {
+        // ignore presence write errors
+      }
+    },
+    [tripId, currentUid, profile?.userId, user?.uid]
+  );
+
+  useEffect(() => {
+    if (!tripId) return;
+    if (presenceUnsubRef.current) {
+      presenceUnsubRef.current();
+      presenceUnsubRef.current = null;
+    }
+    const presCol = collection(db, "trips", tripId, "presence");
+    presenceUnsubRef.current = onSnapshot(
+      presCol,
+      (snap) => {
+        const now = Date.now();
+        const freshCutoffMs = 12000;
+        const names = [];
+        snap.forEach((d) => {
+          const data = d.data() || {};
+          if (d.id === currentUid) return;
+          if (!data.isTyping) return;
+          const t =
+            data.updatedAt?.toMillis?.() ??
+            (typeof data.updatedAt === "number" ? data.updatedAt : 0);
+          if (now - t <= freshCutoffMs) {
+            const label =
+              typeof data.who === "string" && data.who.trim() ? data.who : "user";
+            names.push(label);
+          }
+        });
+        const key = names.sort().join("|");
+        if (key !== lastPresenceNamesRef.current) {
+          lastPresenceNamesRef.current = key;
+          setTypingState((s) => ({ ...s, names }));
+        }
+      },
+      () => {
+        lastPresenceNamesRef.current = "";
+        setTypingState((s) => ({ ...s, names: [] }));
+      }
+    );
+    return () => {
+      if (presenceUnsubRef.current) presenceUnsubRef.current();
+      presenceUnsubRef.current = null;
+    };
+  }, [tripId, currentUid]);
+
+  const handleChatSend = useCallback(
+    async (text, files) => {
+      if (!tripId || !currentUid) return;
+      let mediaIds = [];
+      if (files && files.length > 0) {
+        mediaIds = await addTripMedia(files);
+      }
+      await sendChatMessage(tripId, {
+        fromUid: currentUid,
+        fromShortId: profile?.userId || user?.uid || "user",
+        text: (text || "").trim(),
+        mediaIds,
+      });
+    },
+    [tripId, currentUid, profile?.userId, user?.uid, addTripMedia]
+  );
+
+  /* ======================= RENDER ======================= */
+
+  if (loading || !trip) return <div className="text-sm text-gray-500">Loading…</div>;
+
+  const selectedCount = selected.size;
+  const albums = Array.isArray(trip.albums) ? trip.albums : [];
+
+  return (
+    <div className="mx-auto max-w-6xl space-y-5">
+      {/* header */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-lg font-semibold">Trip Media</h1>
+          <p className="text-sm text-gray-600">Photos and videos shared with this trip.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          {selectedCount > 0 && (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  setThreadName("");
+                  setShowThreadPrompt(true);
+                }}
+                className="rounded-xl bg-black px-3 py-1.5 text-sm font-semibold text-white shadow hover:opacity-90"
+                title="Create memory thread from selected"
+              >
+                Create memory thread ({selectedCount})
+              </button>
+              <button
+                type="button"
+                onClick={clearSelection}
+                className="rounded-xl border px-3 py-1.5 text-sm"
+                title="Clear selection"
+              >
+                Clear
+              </button>
+            </>
+          )}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*,video/*"
+            multiple
+            className="hidden"
+            onChange={handleFiles}
+          />
+          <button
+            type="button"
+            onClick={handlePickFiles}
+            className="rounded-xl bg-black px-3 py-1.5 text-sm font-semibold text-white shadow hover:opacity-90"
+            title="Add photos or videos"
+          >
+            + Add media
+          </button>
+        </div>
+      </div>
+
+      {/* compact search */}
+      <div className="rounded-xl border bg-white px-3 py-2 shadow-sm">
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          className="h-9 w-full rounded-lg border px-3 text-sm placeholder:text-gray-400"
+          placeholder="Search… try: #food @sai type:image sunset"
+        />
+        {chips.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {chips.map((c, i) => (
+              <button
+                key={i}
+                onClick={() => removeChip(c)}
+                className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px]"
+                title="Remove filter"
+              >
+                {c} ✕
+              </button>
+            ))}
+          </div>
+        )}
+        {allTags.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1 text-xs text-gray-500">
+            <span>Tags:</span>
+            {allTags.slice(0, 12).map((t) => (
+              <button
+                key={t}
+                className="rounded-full bg-gray-50 px-2 py-0.5 hover:bg-gray-100"
+                onClick={() => setQuery((q) => (q ? `${q} #${t}` : `#${t}`))}
+                title={`Add #${t}`}
+              >
+                #{t}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* threads */}
+      {albums.length > 0 && (
+        <div className="space-y-2">
+          <div className="text-sm font-medium">Memory threads</div>
+          <div className="flex flex-wrap gap-2">
+            {albums
+              .slice()
+              .sort((a, b) =>
+                (a.createdAt?.seconds || 0) < (b.createdAt?.seconds || 0) ? 1 : -1
+              )
+              .map((t) => (
+                <div
+                  key={t.id}
+                  className="rounded-full border bg-white px-3 py-1 text-xs shadow-sm"
+                >
+                  {t.name} • {(t.mediaIds || []).length}
+                </div>
+              ))}
+          </div>
+        </div>
+      )}
+
+      {/* grid */}
+      {filtered.length === 0 ? (
+        <div className="rounded-xl border bg-white p-8 text-center text-sm text-gray-500">
+          No results{query ? ` for “${query}”` : ""}.
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+          {filtered.map((m, idx) => {
+            const url = urls[m.id];
+            const isVid = (m?.type || "").toLowerCase().startsWith("video/");
+            const isSel = selected.has(m.id);
+
+            if (!url) {
+              return (
+                <div
+                  key={m.id}
+                  className="relative aspect-square animate-pulse overflow-hidden rounded-xl border border-white/60 bg-gray-100"
+                  title="Loading…"
+                />
+              );
+            }
+
+            const allowDelete = canDelete(m);
+            const allowTags = canTag(m);
+
+            return (
+              <div key={m.id} className="group relative">
+                {/* select (hover only) */}
+                <button
+                  type="button"
+                  onClick={() => toggleSelect(m.id)}
+                  className={`absolute left-2 top-2 z-10 hidden rounded-full border px-2 py-1 text-[10px] font-semibold shadow group-hover:inline-block ${
+                    isSel ? "bg-black text-white" : "bg-white/90"
+                  }`}
+                  title={isSel ? "Unselect" : "Select"}
+                >
+                  {isSel ? "Selected" : "Select"}
+                </button>
+
+                {/* thumb */}
+                <button
+                  type="button"
+                  className="relative aspect-square w-full overflow-hidden rounded-xl border border-white/60 bg-white/70 shadow hover:shadow-md"
+                  onClick={() => openViewer(idx)}
+                  title={m.name || ""}
+                >
+                  {isVid ? (
+                    <video
+                      src={url}
+                      className="h-full w-full object-cover"
+                      muted
+                      playsInline
+                      preload="metadata"
+                    />
+                  ) : (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={url} alt={m.name || ""} className="h-full w-full object-cover" />
+                  )}
+                  <div className="absolute inset-0 hidden bg-black/10 group-hover:block" />
+                </button>
+
+                {/* controls (hover only) */}
+                <div className="pointer-events-none absolute inset-x-2 bottom-2 z-10 flex justify-between">
+                  <div className="pointer-events-auto flex flex-wrap gap-1">
+                    {(m.tags || []).slice(0, 3).map((t) => (
+                      <span
+                        key={t}
+                        className="rounded-full bg-white/90 px-2 py-0.5 text-[10px]"
+                      >
+                        #{t}
+                      </span>
+                    ))}
+                    {allowTags && (
+                      <button
+                        type="button"
+                        className="hidden rounded-full bg-white/90 px-2 py-0.5 text-[10px] font-semibold shadow hover:bg-white group-hover:inline-block"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          editTags(m);
+                        }}
+                        title="Edit tags"
+                      >
+                        + tags
+                      </button>
+                    )}
+                  </div>
+
+                  {allowDelete && (
+                    <button
+                      type="button"
+                      className="pointer-events-auto hidden rounded-full bg-red-600/90 px-2 py-1 text-[10px] font-bold text-white shadow hover:bg-red-700 group-hover:block"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDelete(m);
+                      }}
+                      title="Delete media"
+                    >
+                      Delete
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* viewer */}
+      {viewerIdx >= 0 && filtered[viewerIdx] && urls[filtered[viewerIdx].id] && (
+        <>
+          {/* backdrop */}
+          <div
+            className="fixed inset-0 z-40 bg-black/70"
+            onClick={closeViewer}
+            aria-hidden="true"
+          />
+          <div className="fixed inset-0 z-50 flex flex-col">
+            {/* top bar */}
+            <div className="relative flex items-center justify-between px-4 py-3 text-white">
+              <div className="text-sm opacity-90">
+                {filtered[viewerIdx]?.name || "Media"} • {viewerIdx + 1} / {filtered.length}
+              </div>
+              <div className="flex items-center gap-2">
+                {/* Edit toggle (images only) */}
+                {!isVideo && (
+                  <button
+                    className={`rounded-lg px-3 py-1.5 text-sm ${
+                      isEditing ? "bg-white/30" : "bg-white/20"
+                    }`}
+                    onClick={() => {
+                      setIsEditing(true);
+                      setEditOpen((v) => !v);
+                    }}
+                    title="Edit (crop / rotate / contrast)"
+                  >
+                    Edit
+                  </button>
+                )}
+                <button
+                  className="rounded-lg bg-white/10 px-3 py-1.5 text-sm"
+                  onClick={() =>
+                    setZoom((z) => Math.max(0.5, +(z - 0.25).toFixed(2)))
+                  }
+                >
+                  −
+                </button>
+                <span className="min-w-[3.5rem] text-center text-sm">
+                  {(zoom * 100).toFixed(0)}%
+                </span>
+                <button
+                  className="rounded-lg bg-white/10 px-3 py-1.5 text-sm"
+                  onClick={() =>
+                    setZoom((z) => Math.min(4, +(z + 0.25).toFixed(2)))
+                  }
+                >
+                  +
+                </button>
+                <button
+                  className="rounded-lg bg-white/10 px-3 py-1.5 text-sm"
+                  onClick={() => setZoom(1)}
+                >
+                  Reset
+                </button>
+                <button
+                  className="rounded-lg bg-white/20 px-3 py-1.5 text-sm font-semibold"
+                  onClick={closeViewer}
+                >
+                  Close
+                </button>
+              </div>
+
+              {/* FIXED edit dropdown — always above the image */}
+              {isEditing && editOpen && !isVideo && (
+                <div className="fixed right-6 top-16 z-[60] w-72 rounded-xl border border-white/20 bg-black/80 p-3 text-sm text-white shadow-2xl backdrop-blur">
+                  <div className="mb-2 text-[11px] text-white/80">
+                    Drag on the photo to set a crop box.
+                  </div>
+
+                  <div className="mb-2 flex items-center justify-between">
+                    <span className="text-white/90">Rotate</span>
+                    <div className="flex items-center gap-1">
+                      <button
+                        className="rounded bg-white/10 px-2 py-1 text-xs hover:bg-white/20"
+                        onClick={() => setEditRotate((d) => d - 90)}
+                        title="Rotate -90°"
+                      >
+                        ⟲ 90°
+                      </button>
+                      <button
+                        className="rounded bg-white/10 px-2 py-1 text-xs hover:bg-white/20"
+                        onClick={() => setEditRotate((d) => d + 90)}
+                        title="Rotate +90°"
+                      >
+                        ⟳ 90°
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="mb-2">
+                    <div className="mb-1 flex items-center justify-between">
+                      <span>Contrast</span>
+                      <span className="text-[11px]">{editContrast.toFixed(2)}×</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0.5}
+                      max={2}
+                      step={0.05}
+                      value={editContrast}
+                      onChange={(e) => setEditContrast(parseFloat(e.target.value))}
+                      className="w-full"
+                    />
+                  </div>
+
+                  <div className="mt-3 flex items-center justify-end gap-2">
+                    <button
+                      className="rounded border border-white/30 px-3 py-1.5 text-xs"
+                      onClick={() => {
+                        setCropSel(null);
+                        setEditRotate(0);
+                        setEditContrast(1);
+                      }}
+                    >
+                      Reset
+                    </button>
+                    <button
+                      className="rounded bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-600"
+                      onClick={saveEditedCopy}
+                    >
+                      Save as copy
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* stage (click/drag target) */}
+            <div ref={stageRef} className="relative flex-1 select-none">
+              {/* nav arrows */}
+              <button
+                className="absolute left-2 top-1/2 z-50 -translate-y-1/2 rounded-full bg-white/20 px-3 py-2 text-white backdrop-blur hover:bg-white/30"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setViewerIdx((i) => (i <= 0 ? filtered.length - 1 : i - 1));
+                  setZoom(1);
+                  setCropSel(null);
+                }}
+                title="Previous"
+              >
+                ←
+              </button>
+              <button
+                className="absolute right-2 top-1/2 z-50 -translate-y-1/2 rounded-full bg-white/20 px-3 py-2 text-white backdrop-blur hover:bg-white/30"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setViewerIdx((i) => (i >= filtered.length - 1 ? 0 : i + 1));
+                  setZoom(1);
+                  setCropSel(null);
+                }}
+                title="Next"
+              >
+                →
+              </button>
+
+              {/* media */}
+              <div className="flex h-full w-full items-center justify-center p-4">
+                {(() => {
+                  const m = filtered[viewerIdx];
+                  const url = urls[m.id];
+                  const style = {
+                    transform: `scale(${zoom}) rotate(${isEditing ? editRotate : 0}deg)`,
+                    filter: `contrast(${isEditing ? editContrast : 1})`,
+                  };
+                  if ((m?.type || "").toLowerCase().startsWith("video/")) {
+                    return (
+                      <video
+                        src={url}
+                        controls
+                        className="max-h-full max-w-full rounded-lg shadow-2xl"
+                      />
+                    );
+                  }
+                  // eslint-disable-next-line @next/next/no-img-element
+                  return (
+                    <img
+                      src={url}
+                      alt={m.name || ""}
+                      className="max-h-full max-w-full rounded-lg shadow-2xl"
+                      style={style}
+                    />
+                  );
+                })()}
+              </div>
+
+              {/* crop overlay (above image) */}
+              {isEditing && !isVideo && cropSel && cropSel.w > 4 && cropSel.h > 4 && (
+                <div
+                  className="absolute z-[55] border-2 border-white/90 bg-black/20"
+                  style={{ left: cropSel.x, top: cropSel.y, width: cropSel.w, height: cropSel.h }}
+                />
+              )}
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* name thread prompt */}
+      {showThreadPrompt && (
+        <>
+          <div
+            className="fixed inset-0 z-40 bg-black/40"
+            onClick={() => setShowThreadPrompt(false)}
+            aria-hidden="true"
+          />
+          <div className="fixed inset-0 z-50 grid place-items-center p-4">
+            <div className="w-full max-w-md rounded-2xl border bg-white p-4 shadow-xl">
+              <h3 className="mb-2 text-base font-semibold">Name your memory thread</h3>
+              <input
+                className="mb-3 w-full rounded-lg border px-3 py-2"
+                placeholder="e.g., Toronto Day 2 • Street Food"
+                value={threadName}
+                onChange={(e) => setThreadName(e.target.value)}
+              />
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  className="rounded-lg border px-3 py-1.5 text-sm"
+                  onClick={() => setShowThreadPrompt(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="rounded-lg bg-black px-3 py-1.5 text-sm font-semibold text-white"
+                  onClick={async () => {
+                    if (!trip?.id || !threadName.trim() || selected.size === 0) {
+                      setShowThreadPrompt(false);
+                      return;
+                    }
+                    const album = {
+                      id: uuid(),
+                      name: threadName.trim(),
+                      mediaIds: Array.from(selected),
+                      createdBy: currentUid,
+                      createdByName: currentName,
+                      createdAt: serverTimestamp(),
+                    };
+                    try {
+                      await updateDoc(doc(db, "trips", trip.id), { albums: arrayUnion(album) });
+                    } catch (e) {
+                      alert(e?.message || "Failed to create thread.");
+                    }
+                    setSelected(new Set());
+                    setThreadName("");
+                    setShowThreadPrompt(false);
+                  }}
+                >
+                  Create
+                </button>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Docked chat — same thread for this trip, portaled above overlays */}
+      {isGroup && (
+        <PortalChat>
+          <div className="z-[80]">
+            <ChatBox
+              me={profile?.userId || user?.uid || "user"}
+              tripId={tripId}
+              messages={(chatMessages || []).map((m) => ({
+                id: m.id,
+                fromUid: m.fromUid,
+                fromShortId: m.fromShortId,
+                fromName: m.fromShortId || "User",
+                fromAvatar: "",
+                text: m.text || "",
+                at: m.createdAt?.toMillis ? m.createdAt.toMillis() : m.createdAt || Date.now(),
+                mediaIds: Array.isArray(m.mediaIds) ? m.mediaIds : [],
+              }))}
+              mediaIndex={mediaList || []}
+              onSend={handleChatSend}
+              typing={typingState}
+              onTyping={handleTyping}
+              docked
+              startOpen={false}
+            />
+          </div>
+        </PortalChat>
+      )}
+    </div>
+  );
+}

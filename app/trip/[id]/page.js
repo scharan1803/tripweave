@@ -9,7 +9,8 @@ export default function TripPage({ params }) {
   }
   return (
     <div className="space-y-6">
-      <TripClient id={id} />
+      {/* itineraryOnly=true hides tools/media/docs/log/chat sections */}
+      <TripClient id={id} itineraryOnly />
     </div>
   );
 }

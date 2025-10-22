@@ -25,9 +25,9 @@ import ItineraryDay from "../../components/ItineraryDay";
 import ChatBox from "../../components/ChatBox";
 import TripMetaEditor from "../../components/TripMetaEditor";
 import ExportPDFButton from "../../components/ExportPDFButton";
-import TripMediaGallery from "../../components/TripMediaGallery";
 import TripDocsTile from "../../components/TripDocsTile";
-import ExpenseTracker from "../../components/ExpenseTracker";
+// ✂️ ExpenseTracker removed
+// ✂️ TripMediaGallery removed
 import { subscribeChat, sendChatMessage } from "../../lib/chat";
 import { putMediaBlob, uploadTripMedia } from "../../lib/mediaStore";
 
@@ -83,7 +83,7 @@ function Avatar({ src, label, title, ring = "normal" }) {
 }
 
 /* ---------------- component (stable hooks order) ---------------- */
-export default function TripClient({ id }) {
+export default function TripClient({ id, itineraryOnly = false }) {
   const { user, profile, loading } = useAuth();
   const currentUid = user?.uid || "";
   const currentShortId = profile?.userId || currentUid || "anon";
@@ -101,13 +101,13 @@ export default function TripClient({ id }) {
   const prevUserRef = useRef(null);
 
   // Live chat state
-  const [chatMessages, setChatMessages] = useState([]); // [{id, fromUid, fromShortId, text, mediaIds, createdAt}]
+  const [chatMessages, setChatMessages] = useState([]);
   const chatUnsubRef = useRef(null);
 
   // Typing presence state for ChatBox
   const [typingState, setTypingState] = useState({ names: [], meTyping: false });
   const presenceUnsubRef = useRef(null);
-  const lastPresenceNamesRef = useRef(""); // for cheap change detection
+  const lastPresenceNamesRef = useRef("");
   const clearedPresenceOnUnmount = useRef(false);
 
   // mounted
@@ -390,9 +390,9 @@ export default function TripClient({ id }) {
     persist(next, "Updated trip details");
   }
 
-  // media
+  // media (kept for Chat attachments only)
   function currentMediaBytes() {
-    return (trip.media || []).reduce((sum, m) => sum + (m.size || 0), 0);
+    return (trip?.media || []).reduce((sum, m) => sum + (m.size || 0), 0);
   }
   async function addTripMedia(files) {
     if (!canUploadMedia) {
@@ -438,7 +438,7 @@ export default function TripClient({ id }) {
       return metas.map((m) => m.id);
     }
 
-    // GROUP: upload to Storage + Firestore index (70 MB per file enforced in helper)
+    // GROUP: upload to Storage + Firestore index
     const metas = [];
     for (const f of list) {
       try {
@@ -453,7 +453,6 @@ export default function TripClient({ id }) {
       }
     }
     if (metas.length > 0) {
-      // Keep local trip.media history in same shape (for UI compatibility)
       const next = structuredClone(trip);
       next.media = [
         ...(next.media || []),
@@ -473,7 +472,7 @@ export default function TripClient({ id }) {
     return metas.map((m) => m.id);
   }
 
-  // chat sending (unchanged schema; now addTripMedia will route correctly)
+  // chat sending
   const handleChatSend = useCallback(
     async (text, files) => {
       if (!trip?.id || !currentUid) return;
@@ -489,7 +488,7 @@ export default function TripClient({ id }) {
       });
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [trip?.id, currentUid, currentShortId, addTripMedia] 
+    [trip?.id, currentUid, currentShortId, addTripMedia]
   );
 
   async function handleKick(uid) {
@@ -533,7 +532,6 @@ export default function TripClient({ id }) {
     [trip?.id, currentUid, currentShortId]
   );
 
-  // Reader: subscribe to presence docs for this trip
   useEffect(() => {
     if (presenceUnsubRef.current) {
       presenceUnsubRef.current();
@@ -548,11 +546,11 @@ export default function TripClient({ id }) {
       presCol,
       (snap) => {
         const now = Date.now();
-        const freshCutoffMs = 12000; // consider "typing" if updated in last 12s
+        const freshCutoffMs = 12000;
         const names = [];
         snap.forEach((d) => {
           const data = d.data() || {};
-          if (d.id === currentUid) return; // exclude me
+          if (d.id === currentUid) return;
           if (!data.isTyping) return;
           const t =
             data.updatedAt?.toMillis?.() ??
@@ -580,7 +578,6 @@ export default function TripClient({ id }) {
     };
   }, [trip?.id, myRole, currentUid]);
 
-  // Ensure we clear my presence when unmounting or switching trips
   useEffect(() => {
     return () => {
       if (!trip?.id || !currentUid) return;
@@ -671,7 +668,7 @@ export default function TripClient({ id }) {
 
   return (
     <div className="mx-auto max-w-5xl space-y-6 p-4">
-      {/* Neutral header card (no color tile) */}
+      {/* Header */}
       <section className="rounded-2xl border border-gray-100 bg-white p-5 shadow-md">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
@@ -692,15 +689,15 @@ export default function TripClient({ id }) {
         </div>
       </section>
 
-      {/* Trip Meta – kaleidoscopic color underlay */}
+      {/* Trip Meta */}
       <div className="tw-tile tile--kaleido tw-tile-override p-1">
         <TripMetaEditor trip={trip} onSubmit={handleSubmit} />
       </div>
 
-      {/* Only show rest after submitted */}
+      {/* Only show after submitted */}
       {!trip.submitted ? null : (
         <>
-          {/* Summary strip (neutral) */}
+          {/* Summary strip */}
           <section className="rounded-2xl border border-gray-100 bg-white p-5 shadow-md">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <h2 className="text-xl font-bold">
@@ -723,68 +720,9 @@ export default function TripClient({ id }) {
             </div>
           </section>
 
-          {/* Expense + Media */}
-          <section className="grid gap-6 md:grid-cols-2">
-            <div className="tw-tile tile--expense tw-tile-override p-1">
-              <div className="rounded-2xl bg-transparent">
-                <ExpenseTracker
-                  mode={trip.partyType === "group" ? "group" : "solo"}
-                  currency={trip.budget?.currency || "USD"}
-                  estimatedBudget={trip.budget?.estimated ?? null}
-                  expenses={trip.expenses || []}
-                  participants={derived.participantLabels}
-                  currentUserId={currentShortId}
-                  ownerId={trip.ownerUid}
-                  originCountry={trip.originCountry || null}
-                  onSetEstimatedBudget={(n) => {
-                    const next = structuredClone(trip);
-                    next.budget = {
-                      ...(next.budget || { currency: "USD" }),
-                      estimated: n == null ? null : Number(n),
-                    };
-                    persist(next, "Updated estimated budget");
-                  }}
-                  onSetCurrency={(code) => {
-                    const next = structuredClone(trip);
-                    next.budget = { ...(next.budget || {}), currency: code || "USD" };
-                    persist(next, `Changed currency to ${code || "USD"}`);
-                  }}
-                  onSetOriginCountry={(country) => {
-                    const next = structuredClone(trip);
-                    next.originCountry = country || null;
-                    persist(next, `Set origin country: ${country || "—"}`);
-                  }}
-                  onAddExpense={(expDraft) => {
-                    const next = structuredClone(trip);
-                    (next.expenses ||= []).unshift({
-                      id: crypto.randomUUID?.() || String(Date.now()),
-                      ...expDraft,
-                      createdAt: Date.now(),
-                    });
-                    persist(next, `Added expense: ${expDraft.desc}`);
-                  }}
-                  onRemoveExpense={(eid) => {
-                    const next = structuredClone(trip);
-                    next.expenses = (next.expenses || []).filter((e) => e.id !== eid);
-                    persist(next, "Removed an expense");
-                  }}
-                />
-              </div>
-            </div>
+          {/* ✂️ Expense + Media section removed */}
 
-            <div className="tw-tile tile--media tw-tile-override p-1">
-              <TripMediaGallery
-                tripId={trip.id}
-                media={trip.media || []}
-                partyType={trip.partyType || "solo"}
-                onAddMedia={addTripMedia}
-                currentUid={user?.uid}      // NEW
-                ownerUid={trip.ownerUid}    // NEW
-              />
-            </div>
-          </section>
-
-          {/* Itinerary – full width & taller */}
+          {/* Itinerary */}
           <div className="tw-tile tile--itinerary tw-tile-override tw-wide tw-tall p-1">
             <section className="rounded-2xl bg-transparent p-4">
               <div className="mb-3 flex items-center justify-between">
@@ -902,50 +840,52 @@ export default function TripClient({ id }) {
             </section>
           </div>
 
-          {/* Transport + Docs */}
-          <section className="grid gap-6 md:grid-cols-2">
-            <div className="tw-tile tile--transport tw-tile-override p-1">
-              <div className="rounded-2xl bg-transparent p-4">
-                <TransportLinks
-                  mode={trip.transport || "flights"}
-                  origin={derived.origin || "Origin"}
-                  destination={derived.destination || "Destination"}
+          {/* Transport + Docs (HIDDEN when itineraryOnly) */}
+          {!itineraryOnly && (
+            <section className="grid gap-6 md:grid-cols-2">
+              <div className="tw-tile tile--transport tw-tile-override p-1">
+                <div className="rounded-2xl bg-transparent p-4">
+                  <TransportLinks
+                    mode={trip.transport || "flights"}
+                    origin={derived.origin || "Origin"}
+                    destination={derived.destination || "Destination"}
+                  />
+                </div>
+              </div>
+
+              <div className="tw-tile tile--docs tw-tile-override p-1">
+                <TripDocsTile
+                  docs={trip.docs || []}
+                  canEdit={true}
+                  onAdd={(d) =>
+                    persist(
+                      { ...trip, docs: [d, ...(trip.docs || [])] },
+                      `Added doc: ${d.title || "Untitled"}`
+                    )
+                  }
+                  onRemove={(docId) =>
+                    persist(
+                      { ...trip, docs: (trip.docs || []).filter((d) => d.id !== docId) },
+                      "Removed a doc"
+                    )
+                  }
+                  onUpdate={(docId, updated) =>
+                    persist(
+                      {
+                        ...trip,
+                        docs: (trip.docs || []).map((d) =>
+                          d.id === docId ? { ...d, ...updated, updatedAt: Date.now() } : d
+                        ),
+                      },
+                      "Updated a doc"
+                    )
+                  }
                 />
               </div>
-            </div>
+            </section>
+          )}
 
-            <div className="tw-tile tile--docs tw-tile-override p-1">
-              <TripDocsTile
-                docs={trip.docs || []}
-                canEdit={true}
-                onAdd={(d) =>
-                  persist(
-                    { ...trip, docs: [d, ...(trip.docs || [])] },
-                    `Added doc: ${d.title || "Untitled"}`
-                  )
-                }
-                onRemove={(docId) =>
-                  persist(
-                    { ...trip, docs: (trip.docs || []).filter((d) => d.id !== docId) },
-                    "Removed a doc"
-                  )
-                }
-                onUpdate={(docId, updated) =>
-                  persist(
-                    {
-                      ...trip,
-                      docs: (trip.docs || []).map((d) =>
-                        d.id === docId ? { ...d, ...updated, updatedAt: Date.now() } : d
-                      ),
-                    },
-                    "Updated a doc"
-                  )
-                }
-              />
-            </div>
-          </section>
-
-          {/* Trip Log (neutral) */}
+          {/* Trip Log (kept visible) */}
           <section className="rounded-2xl border border-gray-100 bg-white p-5 shadow-md">
             <h3 className="mb-2 text-base font-semibold">Trip Log (clears on sign-out)</h3>
             {!trip.changeLog || trip.changeLog.length === 0 ? (
@@ -967,28 +907,26 @@ export default function TripClient({ id }) {
             </div>
           </section>
 
-          {/* Group chat (neutral) */}
+          {/* Group chat (kept visible) */}
           {derived.isGroup && (
             <ChatBox
               me={currentShortId}
               tripId={trip.id}
-              messages={
-                (chatMessages || []).map((m) => {
-                  const prof = profiles[m.fromUid] || {};
-                  const fromName = prof.name || m.fromShortId || "User";
-                  const fromAvatar = prof.avatar || "";
-                  return {
-                    id: m.id,
-                    fromUid: m.fromUid,
-                    fromShortId: m.fromShortId,
-                    fromName,
-                    fromAvatar,
-                    text: m.text || "",
-                    at: m.createdAt?.toMillis ? m.createdAt.toMillis() : m.createdAt || Date.now(),
-                    mediaIds: Array.isArray(m.mediaIds) ? m.mediaIds : [],
-                  };
-                })
-              }
+              messages={(chatMessages || []).map((m) => {
+                const prof = profiles[m.fromUid] || {};
+                const fromName = prof.name || m.fromShortId || "User";
+                const fromAvatar = prof.avatar || "";
+                return {
+                  id: m.id,
+                  fromUid: m.fromUid,
+                  fromShortId: m.fromShortId,
+                  fromName,
+                  fromAvatar,
+                  text: m.text || "",
+                  at: m.createdAt?.toMillis ? m.createdAt.toMillis() : m.createdAt || Date.now(),
+                  mediaIds: Array.isArray(m.mediaIds) ? m.mediaIds : [],
+                };
+              })}
               mediaIndex={trip.media || []}
               onSend={handleChatSend}
               typing={typingState}
@@ -1002,13 +940,11 @@ export default function TripClient({ id }) {
 
       {/* Global style overrides for tile-wrapped components */}
       <style jsx global>{`
-        /* Make the child "card" sections transparent when wrapped by tw-tile-override */
         .tw-tile-override > section {
           background: transparent !important;
           border-color: transparent !important;
           box-shadow: none !important;
         }
-        /* Keep inner elements constrained */
         .tw-tile-override input,
         .tw-tile-override select,
         .tw-tile-override textarea {
