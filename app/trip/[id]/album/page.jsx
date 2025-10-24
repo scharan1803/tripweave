@@ -1,14 +1,7 @@
 // app/trip/[id]/album/page.jsx
 "use client";
 
-import {
-  useEffect,
-  useMemo,
-  useState,
-  useCallback,
-  useRef,
-} from "react";
-import { createPortal } from "react-dom";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { useParams } from "next/navigation";
 import {
   doc,
@@ -16,8 +9,6 @@ import {
   updateDoc,
   arrayUnion,
   serverTimestamp,
-  collection,
-  setDoc,
 } from "firebase/firestore";
 
 import { useAuth } from "../../../context/AuthProvider";
@@ -33,10 +24,9 @@ import {
   MAX_FILE_BYTES,
 } from "../../../lib/mediaStore";
 
-import ChatBox from "../../../components/ChatBox";
-import { subscribeChat, sendChatMessage } from "../../../lib/chat";
-
 /* ----------------------- small helpers ----------------------- */
+const UNDO_MS = 8000;
+
 function uuid() {
   return (crypto?.randomUUID && crypto.randomUUID()) || `${Date.now()}-${Math.random()}`;
 }
@@ -75,16 +65,49 @@ function parseQuery(q) {
   return { tags, uploaders, type, text: text.join(" ") };
 }
 
-/* ---------- Portal wrapper so ChatBox sits above overlays ---------- */
-function PortalChat({ children }) {
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
-  if (!mounted) return null;
-  return createPortal(children, document.body);
+/* ---------------------- tiny UI bits ---------------------- */
+function Toast({ open, kind = "info", children, onClose }) {
+  if (!open) return null;
+  const bg =
+    kind === "error"
+      ? "bg-red-600"
+      : kind === "success"
+      ? "bg-emerald-600"
+      : "bg-gray-800";
+  return (
+    <div className="fixed bottom-4 left-1/2 z-50 -translate-x-1/2">
+      <div className={`${bg} text-white rounded-full px-4 py-2 shadow-lg text-sm flex items-center gap-3`}>
+        <span>{children}</span>
+        <button
+          className="rounded-full bg-black/20 px-2 py-0.5 text-xs hover:bg-black/30"
+          onClick={onClose}
+        >
+          Close
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function UndoBar({ count, secondsLeft, onUndo }) {
+  if (count <= 0) return null;
+  return (
+    <div className="fixed bottom-4 left-1/2 z-40 -translate-x-1/2">
+      <div className="rounded-full bg-black text-white px-4 py-2 shadow-xl text-sm flex items-center gap-3">
+        <span>{count} item{count > 1 ? "s" : ""} deleted</span>
+        <button
+          className="rounded-full bg-white/15 px-3 py-1 text-xs hover:bg-white/25"
+          onClick={onUndo}
+        >
+          Undo
+        </button>
+        <span className="text-white/70 text-xs">{secondsLeft}s</span>
+      </div>
+    </div>
+  );
 }
 
 /* ======================= PAGE ======================= */
-
 export default function AlbumPage() {
   const { id: rawId } = useParams();
   const tripId = Array.isArray(rawId) ? rawId[0] : rawId;
@@ -122,14 +145,21 @@ export default function AlbumPage() {
   const stageRef = useRef(null);
   const dragRef = useRef({ dragging: false, startX: 0, startY: 0 });
 
-  const fileInputRef = useRef(null);
+  // toast
+  const [toast, setToast] = useState({ open: false, kind: "info", msg: "" });
+  const showToast = useCallback((msg, kind = "info", ms = 2800) => {
+    setToast({ open: true, kind, msg });
+    if (ms > 0) {
+      setTimeout(() => setToast((t) => ({ ...t, open: false })), ms);
+    }
+  }, []);
 
-  // chat
-  const [chatMessages, setChatMessages] = useState([]);
-  const chatUnsubRef = useRef(null);
-  const [typingState, setTypingState] = useState({ names: [], meTyping: false });
-  const presenceUnsubRef = useRef(null);
-  const lastPresenceNamesRef = useRef("");
+  // soft-delete / undo
+  const [pendingBatch, setPendingBatch] = useState(null); // { ids:Set<string>, backupItems:[...], deadline:number, tId:any }
+  const [undoSeconds, setUndoSeconds] = useState(0);
+  const undoTickerRef = useRef(null);
+
+  const fileInputRef = useRef(null);
 
   /* ---------- trip snapshot ---------- */
   useEffect(() => {
@@ -271,38 +301,35 @@ export default function AlbumPage() {
     }
   };
 
-  /* ---------- add media (also used by chat uploads) ---------- */
+  /* ---------- add media ---------- */
   const handlePickFiles = useCallback(() => fileInputRef.current?.click(), []);
-  const addTripMedia = useCallback(
-    async (filesOrList) => {
-      const files = Array.isArray(filesOrList) ? filesOrList : Array.from(filesOrList || []);
-      if (!files.length || !trip) return [];
+  const handleFiles = useCallback(
+    async (e) => {
+      const files = Array.from(e.target.files || []);
+      if (!files.length || !trip) return;
 
       const tooBig = files.find((f) => (f.size || 0) > MAX_FILE_BYTES);
       if (tooBig) {
-        alert(
-          `“${tooBig.name}” is too large. Max file size is ${(MAX_FILE_BYTES / (1024 * 1024)).toFixed(
-            0
-          )} MB.`
+        showToast(
+          `“${tooBig.name}” is too large. Max ${(MAX_FILE_BYTES / (1024 * 1024)).toFixed(0)} MB.`,
+          "error"
         );
-        return [];
+        e.target.value = "";
+        return;
       }
 
       if (isGroup) {
-        const ids = [];
         for (const f of files) {
           try {
-            const idx = await uploadTripMedia(trip.id, f, {
+            await uploadTripMedia(trip.id, f, {
               ownerUid: currentUid,
               ownerName: currentName,
               ownerAvatar: currentAvatar,
             });
-            ids.push(idx.id);
           } catch (err) {
-            alert(err?.message || "Failed to upload a file.");
+            showToast(err?.message || "Failed to upload a file.", "error");
           }
         }
-        return ids;
       } else {
         const metas = [];
         for (const f of files) {
@@ -326,59 +353,17 @@ export default function AlbumPage() {
         } catch {
           setTrip((prev) => ({ ...prev, media: [...(prev?.media || []), ...metas] }));
         }
-        return metas.map((m) => m.id);
       }
-    },
-    [trip, isGroup, currentUid, currentName, currentAvatar]
-  );
-
-  const handleFiles = useCallback(
-    async (e) => {
-      const ids = await addTripMedia(e.target.files);
       e.target.value = "";
-      return ids;
+      showToast(`Added ${files.length} file${files.length > 1 ? "s" : ""}`, "success");
     },
-    [addTripMedia]
+    [trip, isGroup, currentUid, currentName, currentAvatar, showToast]
   );
 
   /* ---------- delete / tag ---------- */
   const canDelete = useCallback(
     (m) => currentUid && (currentUid === trip?.ownerUid || currentUid === (m?.ownerUid || "")),
     [currentUid, trip?.ownerUid]
-  );
-
-  const handleDelete = useCallback(
-    async (m) => {
-      if (!m?.id || !trip?.id) return;
-      if (!canDelete(m)) return alert("You don’t have permission to delete this.");
-      const ok = window.confirm(`Delete “${m.name || "media"}”? This will permanently remove it.`);
-      if (!ok) return;
-
-      // optimistic
-      setMediaList((prev) => prev.filter((x) => x.id !== m.id));
-      setUrls((prev) => {
-        const n = { ...prev };
-        delete n[m.id];
-        return n;
-      });
-
-      try {
-        if (isGroup) {
-          await deleteTripMedia(trip.id, m.id);
-        } else {
-          await deleteMediaBlob(m.id);
-          try {
-            const nextArr = (trip.media || []).filter((x) => x.id !== m.id);
-            await updateDoc(doc(db, "trips", trip.id), { media: nextArr });
-          } catch {
-            setTrip((prev) => ({ ...prev, media: (prev?.media || []).filter((x) => x.id !== m.id) }));
-          }
-        }
-      } catch (e) {
-        alert(e?.message || "Failed to delete.");
-      }
-    },
-    [trip?.id, trip?.media, isGroup, canDelete]
   );
 
   const canTag = useCallback(
@@ -389,7 +374,7 @@ export default function AlbumPage() {
   const editTags = useCallback(
     async (m) => {
       if (!m?.id) return;
-      if (!canTag(m)) return alert("You don’t have permission to tag this.");
+      if (!canTag(m)) return showToast("You don’t have permission to tag this.", "error");
       const current = (Array.isArray(trip?.mediaTags?.[m.id]) ? trip.mediaTags[m.id] : []).join(", ");
       const input = window.prompt("Tags (comma separated):", current);
       if (input == null) return;
@@ -402,12 +387,149 @@ export default function AlbumPage() {
 
       try {
         await updateDoc(doc(db, "trips", trip.id), { [`mediaTags.${m.id}`]: tags });
+        showToast("Tags updated", "success");
       } catch (e) {
-        alert(e?.message || "Failed to save tags.");
+        showToast(e?.message || "Failed to save tags.", "error");
       }
     },
-    [trip?.id, trip?.mediaTags, canTag]
+    [trip?.id, trip?.mediaTags, canTag, showToast]
   );
+
+  /* ---------- SOFT DELETE + UNDO ---------- */
+  const startUndoTicker = useCallback((deadlineMs) => {
+    if (undoTickerRef.current) clearInterval(undoTickerRef.current);
+    const tick = () => {
+      const left = Math.max(0, Math.ceil((deadlineMs - Date.now()) / 1000));
+      setUndoSeconds(left);
+      if (left <= 0) {
+        clearInterval(undoTickerRef.current);
+        undoTickerRef.current = null;
+      }
+    };
+    tick();
+    undoTickerRef.current = setInterval(tick, 250);
+  }, []);
+
+  const beginSoftDelete = useCallback(
+    (ids) => {
+      if (!ids || ids.length === 0) return;
+      // If there's already a batch pending, finalize it immediately (no stacking)
+      if (pendingBatch?.ids?.size) {
+        // Do nothing fancy — just let it finalize; users can undo only the latest
+      }
+
+      // Build backup items to allow undo restore
+      const backup = mediaList.filter((m) => ids.includes(m.id));
+      const idSet = new Set(ids);
+
+      // Optimistic removal in UI
+      setMediaList((prev) => prev.filter((m) => !idSet.has(m.id)));
+      setUrls((prev) => {
+        const copy = { ...prev };
+        ids.forEach((id) => delete copy[id]);
+        return copy;
+      });
+      setSelected(new Set()); // clear current selection
+
+      // Create pending batch with deadline + timer to commit
+      const deadline = Date.now() + UNDO_MS;
+      const tId = setTimeout(() => commitDelete(idSet), UNDO_MS);
+      setPendingBatch({ ids: idSet, backupItems: backup, deadline, tId });
+      startUndoTicker(deadline);
+    
+    },
+    [mediaList, pendingBatch?.ids, showToast, startUndoTicker]
+  );
+
+  const undoSoftDelete = useCallback(() => {
+    if (!pendingBatch?.ids?.size) return;
+    // Restore in UI
+    setMediaList((prev) => {
+      const keepIds = new Set(prev.map((m) => m.id));
+      const toRestore = pendingBatch.backupItems.filter((m) => !keepIds.has(m.id));
+      return [...toRestore, ...prev].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+    });
+    // clear timers/states
+    if (pendingBatch.tId) clearTimeout(pendingBatch.tId);
+    setPendingBatch(null);
+    setUndoSeconds(0);
+    showToast("Deletion undone");
+  }, [pendingBatch, showToast]);
+
+  const commitDelete = useCallback(
+    async (idSet) => {
+      // Finalize deletion in backend
+      const ids = Array.from(idSet || []);
+      if (!ids.length || !trip?.id) return;
+
+      // group vs solo paths
+      const jobs = ids.map(async (id) => {
+        try {
+          if (isGroup) {
+            await deleteTripMedia(trip.id, id);
+          } else {
+            await deleteMediaBlob(id);
+            try {
+              const remain = (trip.media || []).filter((x) => x.id !== id);
+              await updateDoc(doc(db, "trips", trip.id), { media: remain });
+            } catch {
+              // fallback: local
+              setTrip((prev) => ({
+                ...prev,
+                media: (prev?.media || []).filter((x) => x.id !== id),
+              }));
+            }
+          }
+        } catch (e) {
+          const code = e?.code || "";
+          const msg = (e?.message || "").toLowerCase();
+          // ignore not-found in storage (already gone)
+          if (code.includes("object-not-found") || msg.includes("does not exist")) {
+            // noop
+          } else {
+            throw e;
+          }
+        }
+      });
+
+      const results = await Promise.allSettled(jobs);
+      const failures = results.filter((r) => r.status === "rejected");
+      if (failures.length) {
+        showToast(`Some items couldn’t be deleted (${failures.length}).`, "error");
+      } else {
+        showToast("Items deleted");
+      }
+
+      setPendingBatch(null);
+      setUndoSeconds(0);
+    },
+    [trip?.id, trip?.media, isGroup, showToast]
+  );
+
+  // item-level delete uses the same soft-delete
+  const handleDelete = useCallback(
+    (m) => {
+      if (!m?.id) return;
+      if (!canDelete(m)) {
+        showToast("You don’t have permission to delete this.", "error");
+        return;
+      }
+      beginSoftDelete([m.id]);
+    },
+    [canDelete, beginSoftDelete, showToast]
+  );
+
+  const deleteSelected = useCallback(() => {
+    const ids = Array.from(selected);
+    if (!ids.length) return;
+    // filter only those the user can delete
+    const allowed = mediaList.filter((m) => ids.includes(m.id) && canDelete(m)).map((m) => m.id);
+    if (allowed.length === 0) {
+      showToast("No selected items can be deleted.", "error");
+      return;
+    }
+    beginSoftDelete(allowed);
+  }, [selected, mediaList, canDelete, beginSoftDelete, showToast]);
 
   /* ---------- viewer open/close ---------- */
   const openViewer = useCallback(
@@ -439,7 +561,9 @@ export default function AlbumPage() {
 
   const editingItem = viewerIdx >= 0 ? filtered[viewerIdx] : null;
   const editingUrl = editingItem ? urls[editingItem.id] : null;
-  const isVideo = editingItem ? (editingItem.type || "").toLowerCase().startsWith("video/") : false;
+  const isVideo = editingItem
+    ? (editingItem.type || "").toLowerCase().startsWith("video/")
+    : false;
 
   /* ---------- crop gesture when editing ---------- */
   useEffect(() => {
@@ -548,15 +672,21 @@ export default function AlbumPage() {
     ctx.drawImage(cropCanvas, -sw / 2, -sh / 2);
     ctx.restore();
 
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.95));
-    if (!blob) return alert("Could not render edited image.");
+    const blob = await new Promise((resolve) =>
+      canvas.toBlob(resolve, "image/jpeg", 0.95)
+    );
+    if (!blob) {
+      showToast("Could not render edited image.", "error");
+      return;
+    }
 
     const newName =
-      (editingItem.name || "image").replace(/\.(heic|heif|png|webp|gif|jpeg|jpg)$/i, "") +
-      "-edited.jpg";
+      (editingItem.name || "image").replace(
+        /\.(heic|heif|png|webp|gif|jpeg|jpg)$/i,
+        ""
+      ) + "-edited.jpg";
 
     if (isGroup) {
-      // Upload; tags copy for group omitted (we don't have the new id here).
       try {
         await uploadTripMedia(
           trip.id,
@@ -567,11 +697,11 @@ export default function AlbumPage() {
             ownerAvatar: currentAvatar,
           }
         );
+        showToast("Saved copy", "success");
       } catch (e) {
-        alert("Upload failed for edited copy.");
+        showToast("Upload failed for edited copy.", "error");
       }
     } else {
-      // solo: save locally + update trip doc, copy tags
       const mid = uuid();
       await putMediaBlob(mid, new File([blob], newName, { type: "image/jpeg" }));
       const meta = {
@@ -594,9 +724,9 @@ export default function AlbumPage() {
       } catch {
         setTrip((prev) => ({ ...prev, media: [...(prev?.media || []), meta] }));
       }
+      showToast("Saved copy", "success");
     }
 
-    // done
     setIsEditing(false);
     setEditOpen(false);
     setCropSel(null);
@@ -613,103 +743,7 @@ export default function AlbumPage() {
   }, []);
   const clearSelection = useCallback(() => setSelected(new Set()), []);
 
-  /* ---------- chat: subscribe, presence, send ---------- */
-  useEffect(() => {
-    if (chatUnsubRef.current) {
-      chatUnsubRef.current();
-      chatUnsubRef.current = null;
-    }
-    if (!tripId) return;
-    chatUnsubRef.current = subscribeChat(tripId, (msgs) => setChatMessages(msgs || []));
-    return () => {
-      if (chatUnsubRef.current) chatUnsubRef.current();
-      chatUnsubRef.current = null;
-    };
-  }, [tripId]);
-
-  const handleTyping = useCallback(
-    async (isTyping) => {
-      if (!tripId || !currentUid) return;
-      setTypingState((s) => (s.meTyping === isTyping ? s : { ...s, meTyping: isTyping }));
-      try {
-        await setDoc(
-          doc(db, "trips", tripId, "presence", currentUid),
-          {
-            isTyping: !!isTyping,
-            who: profile?.userId || user?.uid || "user",
-            updatedAt: serverTimestamp(),
-          },
-          { merge: true }
-        );
-      } catch {
-        // ignore presence write errors
-      }
-    },
-    [tripId, currentUid, profile?.userId, user?.uid]
-  );
-
-  useEffect(() => {
-    if (!tripId) return;
-    if (presenceUnsubRef.current) {
-      presenceUnsubRef.current();
-      presenceUnsubRef.current = null;
-    }
-    const presCol = collection(db, "trips", tripId, "presence");
-    presenceUnsubRef.current = onSnapshot(
-      presCol,
-      (snap) => {
-        const now = Date.now();
-        const freshCutoffMs = 12000;
-        const names = [];
-        snap.forEach((d) => {
-          const data = d.data() || {};
-          if (d.id === currentUid) return;
-          if (!data.isTyping) return;
-          const t =
-            data.updatedAt?.toMillis?.() ??
-            (typeof data.updatedAt === "number" ? data.updatedAt : 0);
-          if (now - t <= freshCutoffMs) {
-            const label =
-              typeof data.who === "string" && data.who.trim() ? data.who : "user";
-            names.push(label);
-          }
-        });
-        const key = names.sort().join("|");
-        if (key !== lastPresenceNamesRef.current) {
-          lastPresenceNamesRef.current = key;
-          setTypingState((s) => ({ ...s, names }));
-        }
-      },
-      () => {
-        lastPresenceNamesRef.current = "";
-        setTypingState((s) => ({ ...s, names: [] }));
-      }
-    );
-    return () => {
-      if (presenceUnsubRef.current) presenceUnsubRef.current();
-      presenceUnsubRef.current = null;
-    };
-  }, [tripId, currentUid]);
-
-  const handleChatSend = useCallback(
-    async (text, files) => {
-      if (!tripId || !currentUid) return;
-      let mediaIds = [];
-      if (files && files.length > 0) {
-        mediaIds = await addTripMedia(files);
-      }
-      await sendChatMessage(tripId, {
-        fromUid: currentUid,
-        fromShortId: profile?.userId || user?.uid || "user",
-        text: (text || "").trim(),
-        mediaIds,
-      });
-    },
-    [tripId, currentUid, profile?.userId, user?.uid, addTripMedia]
-  );
-
   /* ======================= RENDER ======================= */
-
   if (loading || !trip) return <div className="text-sm text-gray-500">Loading…</div>;
 
   const selectedCount = selected.size;
@@ -737,6 +771,16 @@ export default function AlbumPage() {
               >
                 Create memory thread ({selectedCount})
               </button>
+
+              <button
+                type="button"
+                onClick={deleteSelected}
+                className="rounded-xl bg-red-600 px-3 py-1.5 text-sm font-semibold text-white shadow hover:bg-red-700"
+                title="Delete selected"
+              >
+                Delete ({selectedCount})
+              </button>
+
               <button
                 type="button"
                 onClick={clearSelection}
@@ -892,10 +936,7 @@ export default function AlbumPage() {
                 <div className="pointer-events-none absolute inset-x-2 bottom-2 z-10 flex justify-between">
                   <div className="pointer-events-auto flex flex-wrap gap-1">
                     {(m.tags || []).slice(0, 3).map((t) => (
-                      <span
-                        key={t}
-                        className="rounded-full bg-white/90 px-2 py-0.5 text-[10px]"
-                      >
+                      <span key={t} className="rounded-full bg-white/90 px-2 py-0.5 text-[10px]">
                         #{t}
                       </span>
                     ))}
@@ -953,9 +994,7 @@ export default function AlbumPage() {
                 {/* Edit toggle (images only) */}
                 {!isVideo && (
                   <button
-                    className={`rounded-lg px-3 py-1.5 text-sm ${
-                      isEditing ? "bg-white/30" : "bg-white/20"
-                    }`}
+                    className={`rounded-lg px-3 py-1.5 text-sm ${isEditing ? "bg-white/30" : "bg-white/20"}`}
                     onClick={() => {
                       setIsEditing(true);
                       setEditOpen((v) => !v);
@@ -967,9 +1006,7 @@ export default function AlbumPage() {
                 )}
                 <button
                   className="rounded-lg bg-white/10 px-3 py-1.5 text-sm"
-                  onClick={() =>
-                    setZoom((z) => Math.max(0.5, +(z - 0.25).toFixed(2)))
-                  }
+                  onClick={() => setZoom((z) => Math.max(0.5, +(z - 0.25).toFixed(2)))}
                 >
                   −
                 </button>
@@ -978,9 +1015,7 @@ export default function AlbumPage() {
                 </span>
                 <button
                   className="rounded-lg bg-white/10 px-3 py-1.5 text-sm"
-                  onClick={() =>
-                    setZoom((z) => Math.min(4, +(z + 0.25).toFixed(2)))
-                  }
+                  onClick={() => setZoom((z) => Math.min(4, +(z + 0.25).toFixed(2)))}
                 >
                   +
                 </button>
@@ -1125,7 +1160,12 @@ export default function AlbumPage() {
               {isEditing && !isVideo && cropSel && cropSel.w > 4 && cropSel.h > 4 && (
                 <div
                   className="absolute z-[55] border-2 border-white/90 bg-black/20"
-                  style={{ left: cropSel.x, top: cropSel.y, width: cropSel.w, height: cropSel.h }}
+                  style={{
+                    left: cropSel.x,
+                    top: cropSel.y,
+                    width: cropSel.w,
+                    height: cropSel.h,
+                  }}
                 />
               )}
             </div>
@@ -1173,9 +1213,12 @@ export default function AlbumPage() {
                       createdAt: serverTimestamp(),
                     };
                     try {
-                      await updateDoc(doc(db, "trips", trip.id), { albums: arrayUnion(album) });
+                      await updateDoc(doc(db, "trips", trip.id), {
+                        albums: arrayUnion(album),
+                      });
+                      showToast("Thread created", "success");
                     } catch (e) {
-                      alert(e?.message || "Failed to create thread.");
+                      showToast(e?.message || "Failed to create thread.", "error");
                     }
                     setSelected(new Set());
                     setThreadName("");
@@ -1190,33 +1233,19 @@ export default function AlbumPage() {
         </>
       )}
 
-      {/* Docked chat — same thread for this trip, portaled above overlays */}
-      {isGroup && (
-        <PortalChat>
-          <div className="z-[80]">
-            <ChatBox
-              me={profile?.userId || user?.uid || "user"}
-              tripId={tripId}
-              messages={(chatMessages || []).map((m) => ({
-                id: m.id,
-                fromUid: m.fromUid,
-                fromShortId: m.fromShortId,
-                fromName: m.fromShortId || "User",
-                fromAvatar: "",
-                text: m.text || "",
-                at: m.createdAt?.toMillis ? m.createdAt.toMillis() : m.createdAt || Date.now(),
-                mediaIds: Array.isArray(m.mediaIds) ? m.mediaIds : [],
-              }))}
-              mediaIndex={mediaList || []}
-              onSend={handleChatSend}
-              typing={typingState}
-              onTyping={handleTyping}
-              docked
-              startOpen={false}
-            />
-          </div>
-        </PortalChat>
-      )}
+      {/* Undo + Toast */}
+      <UndoBar
+        count={pendingBatch?.ids?.size || 0}
+        secondsLeft={undoSeconds}
+        onUndo={undoSoftDelete}
+      />
+      <Toast
+        open={toast.open}
+        kind={toast.kind}
+        onClose={() => setToast((t) => ({ ...t, open: false }))}
+      >
+        {toast.msg}
+      </Toast>
     </div>
   );
 }

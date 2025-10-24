@@ -1,3 +1,4 @@
+// app/components/TransportLinks.jsx
 // Shows helpful booking links based on chosen transport.
 // For MVP these are generic links; we’ll personalize later using real data.
 export default function TransportLinks({ mode = "flights", origin = "Toronto", destination = "Banff" }) {
